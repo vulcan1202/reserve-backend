@@ -1,0 +1,24 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "reserve-backend",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-26",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+		"binding": "reserve_db",
+		"database_name": "reserve-db",
+		"database_id": "d2de5aa1-2ad8-47bf-a737-911e8b32ebe4"
+		}
+	]
+}
