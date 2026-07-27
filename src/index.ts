@@ -33,7 +33,7 @@ export default {
     // 🌟 4. 動態產生 CORS 標頭
     const corsHeaders = {
       "Access-Control-Allow-Origin": validOrigin,
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
@@ -127,17 +127,30 @@ export default {
     if (request.method === 'PUT' && safePath === '/api/users') {
       try {
         const body = await request.json() as any;
-        const { id, last_name, first_name, gender, email } = body;
+        // 🌟 接收 password 欄位
+        const { id, last_name, first_name, gender, email, password } = body;
 
         if (!id) {
           return new Response(JSON.stringify({ error: "缺少會員 ID" }), { status: 400, headers: corsHeaders });
         }
 
-        await env.reserve_db.prepare(
-          "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, email = ? WHERE id = ?"
-        )
-        .bind(last_name, first_name, gender, email || null, id)
-        .run();
+        // 🌟 判斷使用者是否有填寫新密碼
+        if (password) {
+          // 有填寫密碼，先雜湊後，連同密碼一起更新
+          const hashedPassword = await hashPassword(password);
+          await env.reserve_db.prepare(
+            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, email = ?, password_hash = ? WHERE id = ?"
+          )
+          .bind(last_name, first_name, gender, email || null, hashedPassword, id)
+          .run();
+        } else {
+          // 沒有填寫密碼，只更新基本資料
+          await env.reserve_db.prepare(
+            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, email = ? WHERE id = ?"
+          )
+          .bind(last_name, first_name, gender, email || null, id)
+          .run();
+        }
 
         return new Response(JSON.stringify({ success: true }), { status: 200, headers: corsHeaders });
       } catch (error: any) {
@@ -179,68 +192,83 @@ export default {
         }
 
     // ==========================================
-        // 路由 3：新增預約 (POST /api/appointments)
-        // ==========================================
-        if (request.method === 'POST' && safePath === '/api/appointments') {
-          try {
-            const body = await request.json() as any;
-            const { user_id, appointment_time } = body;
+    // 路由 3：新增預約 (POST /api/appointments)
+    // ==========================================
+    if (request.method === 'POST' && safePath === '/api/appointments') {
+      try {
+        const body = await request.json() as any;
+        // 🌟 移除 service_name，只接收 user_id, date, start_time
+        const { user_id, date, start_time } = body;
 
-            if (!user_id || !appointment_time) {
-              return new Response(JSON.stringify({ error: "客戶 ID 和預約時間為必填！" }), {
-                status: 400,
-                headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
-              });
-            }
-
-            // 🌟 1. 檢查該時段是否已經被預約過了
-            const existingAppt = await env.reserve_db.prepare(
-              "SELECT * FROM Appointments WHERE appointment_time = ?"
-            )
-            .bind(appointment_time)
-            .first();
-
-            if (existingAppt) {
-              return new Response(JSON.stringify({ error: "這個時段已經被人預約滿囉！請選擇其他時間。" }), {
-                status: 409, // 409 Conflict 代表衝突
-                headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
-              });
-            }
-
-            // 🌟 2. 如果沒有人預約，才執行寫入
-            const result = await env.reserve_db.prepare(
-              "INSERT INTO Appointments (user_id, appointment_time) VALUES (?, ?)"
-            )
-            .bind(user_id, appointment_time)
-            .run();
-
-            return new Response(JSON.stringify({ success: true, message: "預約建立成功！" }), {
-              status: 201,
-              headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
-            });
-
-          } catch (error: any) {
-            console.error("預約寫入失敗：", error);
-            return new Response(JSON.stringify({ error: "預約失敗，請確認該客戶是否存在。" }), {
-              status: 500,
-              headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
-            });
-          }
+        if (!user_id || !date || !start_time) {
+          return new Response(JSON.stringify({ error: "缺少必要的預約資訊" }), { 
+            status: 400, 
+            headers: { "Content-Type": "application/json", ...corsHeaders } 
+          });
         }
+
+        // 1. 計算結束時間 (固定預設 2.5 小時 = 150 分鐘)
+        const [hours, minutes] = start_time.split(':').map(Number);
+        const startTotalMinutes = hours * 60 + minutes;
+        const endTotalMinutes = startTotalMinutes + 150; // 2.5 小時
+        
+        const endHours = Math.floor(endTotalMinutes / 60);
+        const endMinutes = endTotalMinutes % 60;
+        const end_time = `${String(endHours).padStart(2, '0')}:${String(endMinutes).padStart(2, '0')}`;
+
+        // 2. 防撞期檢查
+        const conflict = await env.reserve_db.prepare(`
+          SELECT id FROM Appointments 
+          WHERE date = ? 
+            AND status != 'cancelled'
+            AND (start_time < ? AND end_time > ?)
+        `).bind(date, end_time, start_time).first();
+
+        if (conflict) {
+          return new Response(JSON.stringify({ error: "真不巧！這個時段已經被人預約走了，請選擇其他時間。" }), { 
+            status: 409, 
+            headers: { "Content-Type": "application/json", ...corsHeaders } 
+          });
+        }
+
+        // 🌟 3. 寫入資料庫 (已移除 service_name 欄位)
+        const result = await env.reserve_db.prepare(
+          "INSERT INTO Appointments (user_id, date, start_time, end_time) VALUES (?, ?, ?, ?) RETURNING id"
+        ).bind(user_id, date, start_time, end_time).first();
+
+        return new Response(JSON.stringify({ 
+          success: true, 
+          message: "預約成功！",
+          appointment: { id: result?.id, date, start_time, end_time }
+        }), { 
+          status: 201, 
+          headers: { "Content-Type": "application/json", ...corsHeaders } 
+        });
+
+      } catch (error: any) {
+        return new Response(JSON.stringify({ error: "預約失敗：" + error.message }), { 
+          status: 500, 
+          headers: { "Content-Type": "application/json", ...corsHeaders } 
+        });
+      }
+    }
 
     // ==========================================
     // 路由 4：取得預約紀錄 (GET /api/appointments)
     // ==========================================
     if (request.method === 'GET' && safePath === '/api/appointments') {
       try {
-        // 抓取網址後面的 ?user_id=xxx
         const userId = url.searchParams.get('user_id');
+        const date = url.searchParams.get('date'); // 🌟 補上：抓取網址的 date 參數
 
         let query = `
           SELECT 
-            Appointments.id AS appointment_id,
-            Appointments.appointment_time,
+            Appointments.id,
+            Appointments.date,
+            Appointments.start_time,
+            Appointments.end_time,
             Appointments.status,
+            Users.id AS user_id,
             Users.last_name || Users.first_name AS client_name,
             Users.phone AS client_phone,
             Users.notes AS client_notes
@@ -248,14 +276,17 @@ export default {
           JOIN Users ON Appointments.user_id = Users.id
         `;
 
-        // 如果前端有傳 user_id，就只撈那個人的；沒傳就撈全部 (店家後台用)
         let results;
-        if (userId) {
-          query += " WHERE Appointments.user_id = ? ORDER BY Appointments.appointment_time DESC";
+        if (date) {
+          query += " WHERE Appointments.date = ? AND Appointments.status != 'cancelled' ORDER BY Appointments.start_time ASC";
+          const res = await env.reserve_db.prepare(query).bind(date).all();
+          results = res.results;
+        } else if (userId) {
+          query += " WHERE Appointments.user_id = ? ORDER BY Appointments.date DESC, Appointments.start_time DESC";
           const res = await env.reserve_db.prepare(query).bind(userId).all();
           results = res.results;
         } else {
-          query += " ORDER BY Appointments.appointment_time ASC";
+          query += " ORDER BY Appointments.date ASC, Appointments.start_time ASC";
           const res = await env.reserve_db.prepare(query).all();
           results = res.results;
         }
@@ -407,6 +438,35 @@ export default {
       } catch (error: any) {
         console.error("LINE 登入錯誤：", error);
         return new Response(JSON.stringify({ error: "LINE 驗證失敗，請重試。" }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    if (request.method === 'PATCH' && safePath === '/api/appointments') {
+      try {
+        const body = await request.json() as { id: number; status?: string; notes?: string; user_id?: number };
+        const { id, status, notes, user_id } = body;
+        
+        // 1. 如果有傳入 status，更新預約狀態
+        if (status !== undefined) {
+          await env.reserve_db.prepare(
+            "UPDATE Appointments SET status = ? WHERE id = ?"
+          ).bind(status, id).run();
+        }
+
+        // 2. 如果有傳入 notes 且有 user_id，更新對應使用者的備註
+        if (notes !== undefined && user_id) {
+          await env.reserve_db.prepare(
+            "UPDATE Users SET notes = ? WHERE id = ?"
+          ).bind(notes, user_id).run();
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+        });
+      } catch (error: any) {
+        console.error("更新失敗：", error);
+        return new Response(JSON.stringify({ error: "更新失敗" }), { status: 500, headers: corsHeaders });
       }
     }
 
