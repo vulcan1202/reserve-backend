@@ -2,6 +2,9 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
 export interface Env {
   reserve_db: D1Database;
+  LINE_ACCESS_TOKEN: string;  
+  LINE_CHANNEL_ID: string;  
+  LINE_CHANNEL_SECRET: string;  
 }
 //SHA-256 雜湊密碼的函式
 async function hashPassword(password: string) {
@@ -231,15 +234,26 @@ export default {
           });
         }
 
-        // 🌟 3. 寫入資料庫 (已移除 service_name 欄位)
-        const result = await env.reserve_db.prepare(
-          "INSERT INTO Appointments (user_id, date, start_time, end_time) VALUES (?, ?, ?, ?) RETURNING id"
-        ).bind(user_id, date, start_time, end_time).first();
+        // 🌟 3. 產生 6 碼隨機預約編號 (例如：RV-A8X9K2)
+        const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+        const appointment_code = `RV-${randomCode}`;
 
+        // 🌟 4. 寫入資料庫 (新增 appointment_code 欄位)
+        const result = await env.reserve_db.prepare(
+          "INSERT INTO Appointments (user_id, date, start_time, end_time, appointment_code) VALUES (?, ?, ?, ?, ?) RETURNING id"
+        ).bind(user_id, date, start_time, end_time, appointment_code).first();
+
+        // 🌟 5. 將預約編號回傳給前端
         return new Response(JSON.stringify({ 
           success: true, 
           message: "預約成功！",
-          appointment: { id: result?.id, date, start_time, end_time }
+          appointment: { 
+            id: result?.id, 
+            date, 
+            start_time, 
+            end_time,
+            appointment_code // 回傳給前端顯示
+          }
         }), { 
           status: 201, 
           headers: { "Content-Type": "application/json", ...corsHeaders } 
@@ -380,8 +394,8 @@ export default {
         }
 
         // ⚠️ 請填入你在 LINE Developers 取得的 Channel ID 與 Secret
-        const LINE_CHANNEL_ID = '2010853479'; 
-        const LINE_CHANNEL_SECRET = 'da0a863c30ae277dc6670a2a83e0e82a';
+        const LINE_CHANNEL_ID = env.LINE_CHANNEL_ID; 
+        const LINE_CHANNEL_SECRET = env.LINE_CHANNEL_SECRET;
 
         // 1. 向 LINE 伺服器換取 Access Token
         const tokenResponse = await fetch('https://api.line.me/oauth2/v2.1/token', {
@@ -471,10 +485,120 @@ export default {
     }
 
     // ==========================================
+    // 路由 7：LINE Webhook 接收預約驗證碼 (POST /api/line-webhook)
+    // ==========================================
+    if (request.method === 'POST' && safePath === '/api/line-webhook') {
+      try {
+        const body = await request.json() as any;
+        
+        // LINE 驗證 Webhook 網址時會傳送空的 events
+        if (!body.events || body.events.length === 0) {
+          return new Response("OK", { status: 200 });
+        }
+
+        // ⚠️ 請填入你剛剛在 LINE Developers 取得的 Channel Access Token
+        const LINE_ACCESS_TOKEN = env.LINE_ACCESS_TOKEN;
+
+        for (const event of body.events) {
+          // 只處理「文字訊息」
+          if (event.type === 'message' && event.message.type === 'text') {
+            const replyToken = event.replyToken;
+            const userLineId = event.source.userId; // 抓出客人的真實 LINE ID
+            const text = event.message.text.trim().toUpperCase(); // 轉大寫去空白
+
+            // 檢查訊息是否符合預約編號格式 (例如：RV-A8X9K2)
+            const codeMatch = text.match(/^RV-[A-Z0-9]{6}$/);
+
+            if (codeMatch) {
+              const code = codeMatch[0];
+
+              // 去資料庫找這個預約
+              const appt = await env.reserve_db.prepare(
+                "SELECT id, user_id, status FROM Appointments WHERE appointment_code = ?"
+              ).bind(code).first();
+
+              let replyText = "";
+
+              if (appt && appt.status === 'pending') {
+                // 🌟 1. 找到預約，更新狀態為 confirmed
+                await env.reserve_db.prepare(
+                  "UPDATE Appointments SET status = 'confirmed' WHERE id = ?"
+                ).bind(appt.id).run();
+
+                // 🌟 2. 順手牽羊：把這個真實的 LINE ID 綁定到該會員身上，以後老闆就知道他是誰了！
+                try {
+                  await env.reserve_db.prepare(
+                    "UPDATE Users SET line_id = ? WHERE id = ?"
+                  ).bind(userLineId, appt.user_id).run();
+                } catch (e) {
+                  // 若因為 UNIQUE 限制報錯（例如客人換帳號），就略過，不影響預約確認
+                }
+
+                replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n期待您的光臨！`;
+
+              } else if (appt && appt.status === 'confirmed') {
+                replyText = `⚠️ 您的預約編號 ${code} 已經是確認狀態囉，請勿重複驗證！`;
+              } else {
+                replyText = `❌ 找不到此預約編號，或該預約已超過 30 分鐘自動失效。\n請重新至網站預約。`;
+              }
+
+              // 透過 Reply API 回傳結果給客人 (這個免費不扣額度)
+              await fetch('https://api.line.me/v2/bot/message/reply', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${LINE_ACCESS_TOKEN}`
+                },
+                body: JSON.stringify({
+                  replyToken: replyToken,
+                  messages: [{ type: 'text', text: replyText }]
+                })
+              });
+            }
+          }
+        }
+
+        return new Response("OK", { status: 200 });
+
+      } catch (error) {
+        console.error("Webhook 錯誤：", error);
+        return new Response("Error", { status: 500 });
+      }
+    }
+
+    // ==========================================
     // 預設路由：首頁
     // ==========================================
     return new Response("歡迎來到預約系統 API 伺服器！", {
       headers: { "Content-Type": "text/plain; charset=utf-8", ...corsHeaders }
     });
   },
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    try {
+      // ==========================================
+      // 任務 1：刪除「未確認(pending)」與「已取消(canceled)」的資料
+      // 條件：建立時間超過 30 分鐘
+      // ==========================================
+      await env.reserve_db.prepare(`
+        DELETE FROM Appointments 
+        WHERE status IN ('pending', 'canceled') 
+        AND created_at <= datetime('now', '-30 minutes')
+      `).run();
+
+      // ==========================================
+      // 任務 2：刪除「已確認(confirmed)」的歷史預約資料
+      // 條件：預約日期 (date) 已經過了 2 天
+      // 注意：加上 '+8 hours' 是為了轉換為台灣時區，避免 Cloudflare 的 UTC 時差導致提早刪除
+      // ==========================================
+      await env.reserve_db.prepare(`
+        DELETE FROM Appointments 
+        WHERE status = 'confirmed' 
+        AND date <= date('now', '+8 hours', '-2 days')
+      `).run();
+
+      console.log('✅ 定期清理任務執行完畢');
+    } catch (error) {
+      console.error('❌ 定期清理任務失敗：', error);
+    }
+  }
 };

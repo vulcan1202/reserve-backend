@@ -20,5 +20,10 @@
 		"database_name": "reserve-db",
 		"database_id": "d2de5aa1-2ad8-47bf-a737-911e8b32ebe4"
 		}
-	]
+	],
+	"triggers": {
+		"crons": [
+			"*/15 * * * *"
+		]
+	}
 }
