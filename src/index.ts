@@ -217,13 +217,10 @@ export default {
       }
     }
 
-    // ==========================================
-    // 路由 3：新增預約 (POST /api/appointments)[cite: 1]
-    // ==========================================
     if (request.method === 'POST' && safePath === '/api/appointments') {
       try {
         const body = await request.json() as any;
-        const { user_id, date, start_time } = body;
+        const { user_id, date, start_time, beautician_id } = body;
 
         if (!user_id || !date || !start_time) {
           return new Response(JSON.stringify({ error: "缺少必要的預約資訊" }), { 
@@ -243,6 +240,7 @@ export default {
         const reqDateObj = new Date(date);
         const dayOfWeek = reqDateObj.getDay();
 
+        // 檢查公休與時間衝突
         const holidayCheck = await env.reserve_db.prepare(`
           SELECT * FROM ShopHolidays 
           WHERE 
@@ -282,10 +280,11 @@ export default {
           });
         }
 
-        // 🌟 產生預約編號，若不巧撞號（UNIQUE 衝突）就重新產生再試一次
+        // 🌟 寫入 Appointments 表，包含可選的 beautician_id
         const maxRetries = 5;
         let appointment_code = "";
         let result: any = null;
+        const finalBeauticianId = beautician_id ? Number(beautician_id) : null;
 
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -293,16 +292,14 @@ export default {
 
           try {
             result = await env.reserve_db.prepare(
-              "INSERT INTO Appointments (user_id, date, start_time, end_time, appointment_code) VALUES (?, ?, ?, ?, ?) RETURNING id"
-            ).bind(user_id, date, start_time, end_time, appointment_code).first();
-            break; // ✅ 成功寫入，跳出重試迴圈
+              "INSERT INTO Appointments (user_id, date, start_time, end_time, beautician_id, appointment_code) VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
+            ).bind(user_id, date, start_time, end_time, finalBeauticianId, appointment_code).first();
+            break;
           } catch (err: any) {
             const isUniqueConflict = typeof err?.message === 'string' && err.message.includes('UNIQUE');
-            // 若不是撞號問題，或已經是最後一次重試，直接把錯誤丟出去給外層 catch 處理
             if (!isUniqueConflict || attempt === maxRetries - 1) {
               throw err;
             }
-            // 是撞號問題且還有重試次數 → 換一組新的 appointment_code 再試一次
           }
         }
 
@@ -330,7 +327,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 4：取得預約紀錄 (GET /api/appointments)[cite: 1]
+    // 路由 4：取得預約紀錄 (GET /api/appointments)
     // ==========================================
     if (request.method === 'GET' && safePath === '/api/appointments') {
       try {
@@ -344,12 +341,23 @@ export default {
             Appointments.start_time,
             Appointments.end_time,
             Appointments.status,
+            Appointments.notes AS notes,
+            Appointments.beautician_id,
+            beauticians.name AS beautician_name,
             Users.id AS user_id,
             Users.last_name || Users.first_name AS client_name,
             Users.phone AS client_phone,
-            Users.notes AS client_notes
+            Users.email AS client_email,
+            Users.gender AS client_gender,
+            Users.notes AS user_notes,
+            (
+              SELECT COUNT(*) 
+              FROM Appointments A2 
+              WHERE A2.user_id = Users.id AND A2.status = 'complete'
+            ) AS visit_count
           FROM Appointments
           JOIN Users ON Appointments.user_id = Users.id
+          LEFT JOIN beauticians ON Appointments.beautician_id = beauticians.id
         `;
 
         let results;
@@ -508,28 +516,47 @@ export default {
 
     if (request.method === 'PATCH' && safePath === '/api/appointments') {
       try {
-        const body = await request.json() as { id: number; status?: string; notes?: string; user_id?: number };
-        const { id, status, notes, user_id } = body;
+        const body = await request.json() as { 
+          id: number; 
+          status?: string; 
+          notes?: string; 
+          user_id?: number;
+          user_notes?: string;
+          beautician_id?: number | null;
+        };
+        const { id, status, notes, user_id, user_notes, beautician_id } = body;
         
+        if (!id) {
+          return new Response(JSON.stringify({ error: "缺少預約 ID" }), { status: 400, headers: corsHeaders });
+        }
+
         if (status !== undefined) {
           await env.reserve_db.prepare(
-            "UPDATE Appointments SET status = ? WHERE id = ?"
-          ).bind(status, id).run();
+            "UPDATE Appointments SET status = ? WHERE id = ?").bind(status, id).run();
         }
 
-        if (notes !== undefined && user_id) {
+        if (notes !== undefined) {
           await env.reserve_db.prepare(
-            "UPDATE Users SET notes = ? WHERE id = ?"
-          ).bind(notes, user_id).run();
+            "UPDATE Appointments SET notes = ? WHERE id = ?").bind(notes, id).run();
         }
 
-        return new Response(JSON.stringify({ success: true }), {
+        if (beautician_id !== undefined) {
+          await env.reserve_db.prepare(
+            "UPDATE Appointments SET beautician_id = ? WHERE id = ?").bind(beautician_id, id).run();
+        }
+
+        if (user_notes !== undefined && user_id) {
+          await env.reserve_db.prepare(
+            "UPDATE Users SET notes = ? WHERE id = ?" ).bind(user_notes, user_id).run();
+        }
+
+        return new Response(JSON.stringify({ success: true, message: "更新成功" }), {
           status: 200,
           headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
         });
       } catch (error: any) {
         console.error("更新失敗：", error);
-        return new Response(JSON.stringify({ error: "更新失敗" }), { status: 500, headers: corsHeaders });
+        return new Response(JSON.stringify({ error: "更新失敗：" + error.message }), { status: 500, headers: corsHeaders });
       }
     }
 
@@ -683,6 +710,80 @@ export default {
     }
 
     // ==========================================
+    // 路由：美容師 CRUD API (/api/beauticians)
+    // ==========================================
+    if (safePath === '/api/beauticians') {
+      try {
+        // 1. 取得所有美容師列表 (GET)
+        if (request.method === 'GET') {
+          const { results } = await env.reserve_db.prepare(
+            "SELECT id, name FROM beauticians ORDER BY id ASC"
+          ).all();
+
+          return new Response(JSON.stringify(results), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+          });
+        }
+
+        // 2. 新增美容師 (POST)
+        if (request.method === 'POST') {
+          const body = await request.json() as { name?: string };
+          if (!body.name || !body.name.trim()) {
+            return new Response(JSON.stringify({ error: "美容師姓名為必填！" }), { status: 400, headers: corsHeaders });
+          }
+
+          const result = await env.reserve_db.prepare(
+            "INSERT INTO beauticians (name) VALUES (?) RETURNING id, name"
+          ).bind(body.name.trim()).first();
+
+          return new Response(JSON.stringify({ success: true, beautician: result }), {
+            status: 201,
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+          });
+        }
+
+        // 3. 修改美容師名字 (PUT)
+        if (request.method === 'PUT') {
+          const body = await request.json() as { id?: number; name?: string };
+          if (!body.id || !body.name || !body.name.trim()) {
+            return new Response(JSON.stringify({ error: "缺少美容師 ID 或姓名" }), { status: 400, headers: corsHeaders });
+          }
+
+          await env.reserve_db.prepare(
+            "UPDATE beauticians SET name = ? WHERE id = ?"
+          ).bind(body.name.trim(), body.id).run();
+
+          return new Response(JSON.stringify({ success: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+          });
+        }
+
+        // 4. 刪除美容師 (DELETE)
+        if (request.method === 'DELETE') {
+          const id = url.searchParams.get('id');
+          if (!id) {
+            return new Response(JSON.stringify({ error: "缺少美容師 ID" }), { status: 400, headers: corsHeaders });
+          }
+
+          await env.reserve_db.prepare(
+            "DELETE FROM beauticians WHERE id = ?"
+          ).bind(id).run();
+
+          return new Response(JSON.stringify({ success: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+          });
+        }
+
+      } catch (error: any) {
+        console.error("美容師 API 處理失敗：", error);
+        return new Response(JSON.stringify({ error: error.message || "伺服器錯誤" }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ==========================================
     // 路由 8：新增休假設定 (POST /api/holidays)[cite: 1]
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/holidays') {
@@ -781,9 +882,16 @@ export default {
       `).run();
 
       await env.reserve_db.prepare(`
-        DELETE FROM Appointments 
+        UPDATE Appointments 
+        SET status = 'complete' 
         WHERE status = 'confirmed' 
-        AND date <= date('now', '+8 hours', '-2 days')
+        AND date < date('now', '+8 hours')
+      `).run();
+
+      await env.reserve_db.prepare(`
+        DELETE FROM Appointments 
+        WHERE status = 'complete' 
+        AND date <= date('now', '+8 hours', '-5 years')
       `).run();
 
       await env.reserve_db.prepare(`
@@ -793,9 +901,9 @@ export default {
       `).run();
 
 
-      console.log('✅ 定期清理任務執行完畢');
+      console.log('✅ scheduled任務執行完畢');
     } catch (error) {
-      console.error('❌ 定期清理任務失敗：', error);
+      console.error('❌ scheduled任務失敗：', error);
     }
   }
 };

@@ -35,15 +35,24 @@ CREATE TABLE Appointments (
     date TEXT NOT NULL,
     start_time TEXT NOT NULL,
     end_time TEXT NOT NULL,
+    beautician_id INTEGER,
     appointment_code TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'cancelled')) DEFAULT 'pending',
+    notes TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'cancelled', 'complete')) DEFAULT 'pending',
     -- 🌟 改為台灣時間 (UTC+8)
     created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
     
     FOREIGN KEY (user_id) REFERENCES Users(id) ON DELETE CASCADE
+    FOREIGN KEY (beautician_id) REFERENCES beauticians(id) ON DELETE SET NULL
 );
 
--- 3. 建立店家休假與時段設定表 (ShopHolidays)
+--美容師列表
+CREATE TABLE beauticians (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+);
+
+-- 4. 建立店家休假與時段設定表 (ShopHolidays)
 CREATE TABLE ShopHolidays (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     
