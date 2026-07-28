@@ -116,6 +116,51 @@ export default {
     }
 
     // ==========================================
+    // 路由：LINE LIFF 靜默登入 (POST /api/liff-login)
+    // ==========================================
+    if (request.method === 'POST' && safePath === '/api/liff-login') {
+      try {
+        const body = await request.json() as any;
+        const { line_id, id_token } = body;
+
+        if (!line_id) {
+          return new Response(JSON.stringify({ error: "缺少 LINE ID" }), { status: 400, headers: corsHeaders });
+        }
+
+        // 去資料庫尋找這個 line_id 是否已經綁定過會員
+        const existingUser = await env.reserve_db.prepare(
+          "SELECT id, last_name, first_name, gender, email FROM Users WHERE line_id = ?"
+        ).bind(line_id).first();
+
+        if (existingUser) {
+          // 👉 情境 A (老客)：直接回傳登入成功，前端就可以把資料存進 localStorage 並跳轉預約頁面
+          return new Response(JSON.stringify({ 
+            success: true, 
+            action: "login", 
+            user: {
+              id: existingUser.id,
+              lastName: existingUser.last_name,
+              firstName: existingUser.first_name,
+              gender: existingUser.gender,
+              email: existingUser.email
+            }
+          }), { status: 200, headers: corsHeaders });
+        } else {
+          // 👉 情境 B (新客)：資料庫找不到，回傳 require_register 讓前端引導填寫基本資料
+          return new Response(JSON.stringify({ 
+            success: true, 
+            action: "require_register", 
+            line_id: line_id 
+          }), { status: 200, headers: corsHeaders });
+        }
+
+      } catch (error: any) {
+        console.error("LIFF 登入錯誤：", error);
+        return new Response(JSON.stringify({ error: "LIFF 驗證失敗" }), { status: 500, headers: corsHeaders });
+      }
+    }
+    
+    // ==========================================
     // 路由：修改會員資料 API (PUT /api/users)[cite: 1]
     // ==========================================
     if (request.method === 'PUT' && safePath === '/api/users') {
