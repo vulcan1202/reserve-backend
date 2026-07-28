@@ -219,6 +219,39 @@ export default {
         const endMinutes = endTotalMinutes % 60;
         const end_time = `${String(endHours).padStart(2, '0')}:${String(endMinutes).padStart(2, '0')}`;
 
+        const reqDateObj = new Date(date);
+        const dayOfWeek = reqDateObj.getDay();
+
+        const holidayCheck = await env.reserve_db.prepare(`
+          SELECT * FROM ShopHolidays 
+          WHERE 
+            -- 條件 A：遇到單日全天休假
+            (type = 'full_day' AND date = ?)
+            OR 
+            -- 條件 B：遇到每週固定公休
+            (type = 'weekly' AND day_of_week = ?)
+            OR
+            -- 條件 C：遇到特定時段休息 (檢查時段是否有重疊)
+            (type = 'time_range' AND date = ? AND (
+               (start_time <= ? AND end_time > ?) OR
+               (start_time < ? AND end_time >= ?) OR
+               (start_time >= ? AND end_time <= ?)
+            ))
+        `).bind(
+          date, 
+          dayOfWeek, 
+          date, start_time, start_time, end_time, end_time, start_time, end_time
+        ).first();
+
+        if (holidayCheck) {
+          return new Response(JSON.stringify({ 
+            error: "抱歉！您選擇的時間為店家公休日或休息時段，請重新選擇。" 
+          }), { 
+            status: 409, 
+            headers: { "Content-Type": "application/json", ...corsHeaders } 
+          });
+        }
+        
         // 2. 防撞期檢查
         const conflict = await env.reserve_db.prepare(`
           SELECT id FROM Appointments 
@@ -563,6 +596,95 @@ export default {
       } catch (error) {
         console.error("Webhook 錯誤：", error);
         return new Response("Error", { status: 500 });
+      }
+    }
+
+    // ==========================================
+    // 路由 8：新增休假設定 (POST /api/holidays)
+    // ==========================================
+    if (request.method === 'POST' && safePath === '/api/holidays') {
+      try {
+        const body = await request.json() as any;
+        const { type, date, start_time, end_time, day_of_week, reason } = body;
+
+        // 1. 基本檢查
+        if (!type || !['full_day', 'time_range', 'weekly'].includes(type)) {
+          return new Response(JSON.stringify({ error: "無效的休假類型" }), { status: 400, headers: corsHeaders });
+        }
+
+        if (type === 'full_day' && !date) {
+          return new Response(JSON.stringify({ error: "全天公休必須指定日期" }), { status: 400, headers: corsHeaders });
+        }
+        if (type === 'time_range' && (!date || !start_time || !end_time)) {
+          return new Response(JSON.stringify({ error: "時段休息必須指定日期、開始與結束時間" }), { status: 400, headers: corsHeaders });
+        }
+        if (type === 'weekly' && day_of_week === undefined) {
+          return new Response(JSON.stringify({ error: "固定公休必須指定星期幾" }), { status: 400, headers: corsHeaders });
+        }
+        const finalDayOfWeek = type === 'weekly' ? day_of_week : null;
+
+        // 2. 寫入資料庫
+        await env.reserve_db.prepare(
+          "INSERT INTO ShopHolidays (type, date, start_time, end_time, day_of_week, reason) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(type, date || null, start_time || null, end_time || null, finalDayOfWeek, reason || null)
+        .run();
+
+        return new Response(JSON.stringify({ success: true, message: "休假設定已新增" }), {
+          status: 201,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      } catch (error: any) {
+        console.error("新增休假失敗：", error);
+        return new Response(JSON.stringify({ error: "新增休假失敗" }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ==========================================
+    // 路由 9：取得所有休假設定 (GET /api/holidays)
+    // ==========================================
+    if (request.method === 'GET' && safePath === '/api/holidays') {
+      try {
+        // 抓出未來（包含今天）的休假設定，或是固定每週公休的設定
+        // 因為舊的單日休假過期了就不太需要再傳給前端
+        const { results } = await env.reserve_db.prepare(`
+          SELECT * FROM ShopHolidays 
+          WHERE type = 'weekly' 
+             OR (type IN ('full_day', 'time_range') AND date >= date('now', '+8 hours'))
+          ORDER BY type DESC, date ASC, day_of_week ASC
+        `).all();
+
+        return new Response(JSON.stringify(results), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+        });
+      } catch (error: any) {
+        console.error("讀取休假設定失敗：", error);
+        return new Response(JSON.stringify({ error: "讀取休假設定失敗" }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ==========================================
+    // 路由 10：刪除指定的休假設定 (DELETE /api/holidays)
+    // ==========================================
+    if (request.method === 'DELETE' && safePath === '/api/holidays') {
+      try {
+        const urlObj = new URL(request.url);
+        const id = urlObj.searchParams.get('id');
+
+        if (!id) {
+          return new Response(JSON.stringify({ error: "缺少要刪除的休假 ID" }), { status: 400, headers: corsHeaders });
+        }
+
+        await env.reserve_db.prepare("DELETE FROM ShopHolidays WHERE id = ?").bind(id).run();
+
+        return new Response(JSON.stringify({ success: true, message: "已刪除該休假設定" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      } catch (error: any) {
+        console.error("刪除休假失敗：", error);
+        return new Response(JSON.stringify({ error: "刪除失敗" }), { status: 500, headers: corsHeaders });
       }
     }
 
