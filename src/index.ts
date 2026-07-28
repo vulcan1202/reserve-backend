@@ -159,7 +159,7 @@ export default {
         return new Response(JSON.stringify({ error: "LIFF 驗證失敗" }), { status: 500, headers: corsHeaders });
       }
     }
-    
+
     // ==========================================
     // 路由：修改會員資料 API (PUT /api/users)[cite: 1]
     // ==========================================
@@ -780,6 +780,13 @@ export default {
         WHERE status = 'confirmed' 
         AND date <= date('now', '+8 hours', '-2 days')
       `).run();
+
+      await env.reserve_db.prepare(`
+        DELETE FROM ShopHolidays 
+        WHERE type IN ('full_day', 'time_range')
+        AND date <= date('now','+8 hours','-2 days')
+      `).run();
+
 
       console.log('✅ 定期清理任務執行完畢');
     } catch (error) {
