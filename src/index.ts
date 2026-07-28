@@ -552,6 +552,11 @@ export default {
             const userLineId = event.source.userId; // 訊息來源 LINE ID
             const text = event.message.text.trim().toUpperCase();
 
+            const ignoreKeywords = ['價目表'];
+            if (ignoreKeywords.includes(text)) {
+              continue; 
+            }
+
             // 檢查是否符合預約編號格式 (例如：RV-A8X9K2)
             const codeMatch = text.match(/^RV-[A-Z0-9]{6}$/);
 
