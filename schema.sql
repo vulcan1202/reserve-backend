@@ -4,6 +4,7 @@ PRAGMA foreign_keys = ON;
 -- 每次執行時先刪除舊表
 DROP TABLE IF EXISTS Appointments;
 DROP TABLE IF EXISTS Users;
+DROP TABLE IF EXISTS LineAutoReplies;
 
 -- 1. 建立客戶資料表 (Users)
 CREATE TABLE Users (
@@ -20,15 +21,21 @@ CREATE TABLE Users (
     created_at DATETIME DEFAULT (datetime('now', '+8 hours'))
 );
 
--- 2. 建立預約紀錄表 (Appointments)
+-- 2. 建立 LINE 自動回覆記錄表 (獨立追蹤，不綁定 Users)[cite: 1]
+CREATE TABLE LineAutoReplies (
+    line_id TEXT UNIQUE PRIMARY KEY,
+    last_auto_reply_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT (datetime('now', '+8 hours'))
+);
+
+-- 3. 建立預約紀錄表 (Appointments)
 CREATE TABLE Appointments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     date TEXT NOT NULL,
     start_time TEXT NOT NULL,
     end_time TEXT NOT NULL,
-    -- 🌟 新增預約編號欄位
-    appointment_code TEXT NOT NULL,
+    appointment_code TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed', 'cancelled')) DEFAULT 'pending',
     -- 🌟 改為台灣時間 (UTC+8)
     created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
