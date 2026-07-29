@@ -7,7 +7,7 @@ export interface Env {
   LINE_CHANNEL_SECRET: string;  
 }
 
-// SHA-256 雜湊密碼的函式[cite: 1]
+// SHA-256 雜湊密碼的函式
 async function hashPassword(password: string) {
   const msgBuffer = new TextEncoder().encode(password);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
@@ -40,16 +40,16 @@ export default {
     }
 
     // ==========================================
-    // 路由 1：會員註冊 API (POST /api/users)[cite: 1]
+    // 路由 1：會員註冊 API (POST /api/users)
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/users') {
       try {
         const body = await request.json() as any;
-        const { last_name, first_name, phone, password, gender, email, notes, line_id } = body;
+        const { last_name, first_name, phone, password, date_of_birth, gender, location, email, notes, line_id } = body;
 
-        // 🌟 本系統只開放透過 LINE 綁定的方式註冊，line_id 一定要有值
-        if (!last_name || !first_name || !phone || !password || !gender || !line_id) {
-          return new Response(JSON.stringify({ error: "姓、名、電話、密碼、性別與 LINE 綁定皆為必填！請先完成 LINE 驗證再註冊。" }), {
+        // 🌟 生日設為必填欄位 (符合 SQL 中的 NOT NULL 限制)
+        if (!last_name || !first_name || !phone || !password || !gender || !date_of_birth || !line_id) {
+          return new Response(JSON.stringify({ error: "姓、名、電話、密碼、生日、性別與 LINE 綁定皆為必填！" }), {
             status: 400,
             headers: { "Content-Type": "application/json", ...corsHeaders }
           });
@@ -63,7 +63,6 @@ export default {
           });
         }
 
-        // 🌟 綁定防呆：這個 line_id 是否已經有帳號了？有的話代表是老客戶，不該重複建立帳號，直接請他登入
         const existingLineUser = await env.reserve_db.prepare(
           "SELECT id FROM Users WHERE line_id = ?"
         ).bind(line_id).first();
@@ -91,10 +90,11 @@ export default {
 
         const hashedPassword = await hashPassword(password);
 
+        // 🌟 INSERT 寫入語句包含 date_of_birth 與 location
         const result = await env.reserve_db.prepare(
-          "INSERT INTO Users (last_name, first_name, phone, password_hash, gender, email, notes, line_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+          "INSERT INTO Users (last_name, first_name, phone, date_of_birth, gender, location, password_hash, email, notes, line_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
         )
-        .bind(last_name, first_name, phone, hashedPassword, gender, email || null, notes || null, line_id)
+        .bind(last_name, first_name, phone, date_of_birth, gender, location || null, hashedPassword, email || null, notes || null, line_id)
         .first();
 
         return new Response(JSON.stringify({ 
@@ -121,19 +121,18 @@ export default {
     if (request.method === 'POST' && safePath === '/api/liff-login') {
       try {
         const body = await request.json() as any;
-        const { line_id, id_token } = body;
+        const { line_id } = body;
 
         if (!line_id) {
           return new Response(JSON.stringify({ error: "缺少 LINE ID" }), { status: 400, headers: corsHeaders });
         }
 
-        // 去資料庫尋找這個 line_id 是否已經綁定過會員
+        // 🌟 確保 SELECT 包含 date_of_birth 與 location
         const existingUser = await env.reserve_db.prepare(
-          "SELECT id, last_name, first_name, gender, email FROM Users WHERE line_id = ?"
+          "SELECT id, last_name, first_name, gender, date_of_birth, location, email FROM Users WHERE line_id = ?"
         ).bind(line_id).first();
 
         if (existingUser) {
-          // 👉 情境 A (老客)：直接回傳登入成功，前端就可以把資料存進 localStorage 並跳轉預約頁面
           return new Response(JSON.stringify({ 
             success: true, 
             action: "login", 
@@ -142,11 +141,12 @@ export default {
               lastName: existingUser.last_name,
               firstName: existingUser.first_name,
               gender: existingUser.gender,
+              dateOfBirth: existingUser.date_of_birth, // 回傳生日
+              location: existingUser.location,         // 回傳地區
               email: existingUser.email
             }
           }), { status: 200, headers: corsHeaders });
         } else {
-          // 👉 情境 B (新客)：資料庫找不到，回傳 require_register 讓前端引導填寫基本資料
           return new Response(JSON.stringify({ 
             success: true, 
             action: "require_register", 
@@ -161,13 +161,13 @@ export default {
     }
 
     // ==========================================
-    // 路由：修改會員資料 API (PUT /api/users)[cite: 1]
+    // 路由：修改會員資料 API (PUT /api/users)
     // ==========================================
     if (request.method === 'PUT' && safePath === '/api/users') {
       try {
         const body = await request.json() as any;
-        const { id, last_name, first_name, gender, email, password } = body;
-
+        const { id, last_name, first_name, gender, date_of_birth, location, email, password } = body;
+        
         if (!id) {
           return new Response(JSON.stringify({ error: "缺少會員 ID" }), { status: 400, headers: corsHeaders });
         }
@@ -175,31 +175,34 @@ export default {
         if (password) {
           const hashedPassword = await hashPassword(password);
           await env.reserve_db.prepare(
-            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, email = ?, password_hash = ? WHERE id = ?"
+            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, date_of_birth = ?, location = ?, email = ?, password_hash = ? WHERE id = ?"
           )
-          .bind(last_name, first_name, gender, email || null, hashedPassword, id)
+          // 🌟 確保 .bind() 的參數順序與數量完全對應 SQL 裡的 ?
+          .bind(last_name, first_name, gender, date_of_birth, location || null, email || null, hashedPassword, id)
           .run();
         } else {
           await env.reserve_db.prepare(
-            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, email = ? WHERE id = ?"
+            "UPDATE Users SET last_name = ?, first_name = ?, gender = ?, date_of_birth = ?, location = ?, email = ? WHERE id = ?"
           )
-          .bind(last_name, first_name, gender, email || null, id)
+          // 🌟 確保 .bind() 的參數順序與數量完全對應 SQL 裡的 ?
+          .bind(last_name, first_name, gender, date_of_birth, location || null, email || null, id)
           .run();
         }
 
         return new Response(JSON.stringify({ success: true }), { status: 200, headers: corsHeaders });
       } catch (error: any) {
+        console.error("更新會員資料失敗：", error);
         return new Response(JSON.stringify({ error: "更新失敗" }), { status: 500, headers: corsHeaders });
       }
     }
 
     // ==========================================
-    // 路由 2：取得所有客戶名單 (GET /api/users)[cite: 1]
+    // 路由 2：取得所有客戶名單 (GET /api/users)
     // ==========================================
     if (request.method === 'GET' && safePath === '/api/users') {
       try {
         const { results } = await env.reserve_db.prepare(`
-          SELECT id, last_name, first_name, phone, gender, email, notes, created_at
+          SELECT id, last_name, first_name, phone, date_of_birth, gender, location, email, notes, created_at
           FROM Users
           ORDER BY created_at DESC
         `).all();
@@ -217,6 +220,9 @@ export default {
       }
     }
 
+    // ==========================================
+    // 路由：新增預約 (POST /api/appointments)
+    // ==========================================
     if (request.method === 'POST' && safePath === '/api/appointments') {
       try {
         const body = await request.json() as any;
@@ -240,7 +246,6 @@ export default {
         const reqDateObj = new Date(date);
         const dayOfWeek = reqDateObj.getDay();
 
-        // 檢查公休與時間衝突
         const holidayCheck = await env.reserve_db.prepare(`
           SELECT * FROM ShopHolidays 
           WHERE 
@@ -280,7 +285,6 @@ export default {
           });
         }
 
-        // 🌟 寫入 Appointments 表，包含可選的 beautician_id
         const maxRetries = 5;
         let appointment_code = "";
         let result: any = null;
@@ -350,6 +354,8 @@ export default {
             Users.phone AS client_phone,
             Users.email AS client_email,
             Users.gender AS client_gender,
+            Users.date_of_birth AS client_date_of_birth,
+            Users.location AS client_location,
             Users.notes AS user_notes,
             (
               SELECT COUNT(*) 
@@ -387,7 +393,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 5：會員登入 API (POST /api/login)[cite: 1]
+    // 路由 5：會員登入 API (POST /api/login)
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/login') {
       try {
@@ -401,8 +407,9 @@ export default {
           });
         }
 
+        // 🌟 確保 SELECT 包含 date_of_birth 與 location
         const user = await env.reserve_db.prepare(
-          "SELECT id, last_name, first_name, gender, email, password_hash FROM Users WHERE phone = ?"
+          "SELECT id, last_name, first_name, gender, date_of_birth, location, email, password_hash FROM Users WHERE phone = ?"
         )
         .bind(phone)
         .first();
@@ -430,7 +437,9 @@ export default {
             id: user.id,
             lastName: user.last_name,
             firstName: user.first_name,
-            gender: user.gender, 
+            gender: user.gender,
+            dateOfBirth: user.date_of_birth, // 🌟 確保回傳
+            location: user.location,         // 🌟 確保回傳
             email: user.email 
           }
         }), {
@@ -448,7 +457,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 6：LINE 登入與驗證 (POST /api/line-login)[cite: 1]
+    // 路由 6：LINE 登入與驗證 (POST /api/line-login)
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/line-login') {
       try {
@@ -485,8 +494,9 @@ export default {
 
         if (!lineId) throw new Error("無法取得 LINE 帳號資訊");
 
+        // 🌟 確保 SELECT 包含 date_of_birth 與 location
         const existingUser = await env.reserve_db.prepare(
-          "SELECT id, last_name, first_name, gender, email FROM Users WHERE line_id = ?"
+          "SELECT id, last_name, first_name, gender, date_of_birth, location, email FROM Users WHERE line_id = ?"
         ).bind(lineId).first();
 
         if (existingUser) {
@@ -498,10 +508,13 @@ export default {
               lastName: existingUser.last_name,
               firstName: existingUser.first_name,
               gender: existingUser.gender,
+              dateOfBirth: existingUser.date_of_birth, // 🌟 回傳
+              location: existingUser.location,         // 🌟 回傳
               email: existingUser.email
             }
           }), { status: 200, headers: corsHeaders });
         } else {
+          // 🌟 修復了原本遺漏的 else 區塊 (針對需要註冊的新朋友)
           return new Response(JSON.stringify({ 
             success: true, 
             action: "require_register", 
@@ -562,7 +575,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 7：LINE Webhook (預約驗證與智慧自動回覆)[cite: 1]
+    // 路由 7：LINE Webhook (預約驗證與智慧自動回覆)
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/line-webhook') {
       try {
@@ -592,7 +605,6 @@ export default {
               const code = codeMatch[0];
               let replyText = "";
 
-              // 🌟 1. 先用 line_id 找 Users 確定發讯者身分
               const currentUser = await env.reserve_db.prepare(
                 "SELECT id FROM Users WHERE line_id = ?"
               ).bind(userLineId).first() as { id: number } | null;
@@ -600,7 +612,6 @@ export default {
               if (!currentUser) {
                 replyText = `❌ 驗證失敗：您的 LINE 尚未綁定網站會員帳號。\n請先至網站註冊或登入後進行 LINE 綁定，才能驗證預約！`;
               } else {
-                // 🌟 2. 去資料庫找這個預約編號
                 const appt = await env.reserve_db.prepare(
                   "SELECT id, user_id, status FROM Appointments WHERE appointment_code = ?"
                 ).bind(code).first() as { id: number; user_id: number; status: string } | null;
@@ -608,12 +619,10 @@ export default {
                 if (!appt) {
                   replyText = `❌ 找不到此預約編號，或該預約已超過 30 分鐘自動失效。\n請重新至網站預約。`;
                 } else if (appt.user_id !== currentUser.id) {
-                  // 🌟 3. 嚴格檢查：只要不符合 user_id 則代表非本人，拒絕驗證別人的預約！
                   replyText = `❌ 驗證失敗：此預約編號不屬於您的帳號。\n您只能驗證您自己透過網站所建立的預約！`;
                 } else if (appt.status === 'confirmed') {
                   replyText = `⚠️ 您的預約編號 ${code} 已經是確認狀態囉，請勿重複驗證！`;
                 } else if (appt.status === 'pending') {
-                  // 符合本人且為 pending，更新狀態為 confirmed
                   await env.reserve_db.prepare(
                     "UPDATE Appointments SET status = 'confirmed' WHERE id = ?"
                   ).bind(appt.id).run();
@@ -624,7 +633,6 @@ export default {
                 }
               }
 
-              // 回傳預約驗證結果給 LINE 使用者
               await fetch('https://api.line.me/v2/bot/message/reply', {
                 method: 'POST',
                 headers: {
@@ -638,30 +646,23 @@ export default {
               });
 
             } else {
-              // ==========================
-              // 自動回覆邏輯 (獨立處理，不強制綁定 User)[cite: 1]
-              // ==========================
-
-              // 1. 檢查這個 line_id 上一次自動回覆的時間
+              // 自動回覆邏輯
               const autoReplyRecord = await env.reserve_db.prepare(
                 "SELECT last_auto_reply_at FROM LineAutoReplies WHERE line_id = ?"
               ).bind(userLineId).first() as { last_auto_reply_at: string } | null;
 
               let shouldReply = true;
               if (autoReplyRecord && autoReplyRecord.last_auto_reply_at) {
-                // 計算與上次回覆的時間差 (分鐘)
                 const lastTime = new Date(autoReplyRecord.last_auto_reply_at.replace(' ', 'T') + '+08:00').getTime();
                 const nowTime = new Date().getTime();
                 const diffMinutes = (nowTime - lastTime) / (1000 * 60);
 
-                // 🌟 30 分鐘內只回覆一次
                 if (diffMinutes < 30) {
                   shouldReply = false;
                 }
               }
 
               if (shouldReply) {
-                // 取得台灣時間的小時
                 const now = new Date();
                 const taipeiHour = Number(
                   new Intl.DateTimeFormat("en-US", {
@@ -671,14 +672,12 @@ export default {
                   }).format(now)
                 );
                 
-                // 🌟 10:00～20:00 為上班時間
                 const isBusinessHour = taipeiHour >= 10 && taipeiHour < 20;
 
                 const autoReplyText = isBusinessHour
                   ? `感謝您的訊息！\n我們會儘快回覆您\n請耐心稍等噢☺️`
                   : `我們已收到您的訊息！\n目前非上班時間\n我們會在上班後盡快回覆!\n請耐心等候❤️`;
 
-                // 發送自動回覆
                 await fetch('https://api.line.me/v2/bot/message/reply', {
                   method: 'POST',
                   headers: {
@@ -691,7 +690,6 @@ export default {
                   })
                 });
 
-                // 🌟 成功回覆後更新/插入 last_auto_reply_at 記錄（不需寫入 Users 表）
                 await env.reserve_db.prepare(`
                   INSERT INTO LineAutoReplies (line_id, last_auto_reply_at)
                   VALUES (?, datetime('now', '+8 hours'))
@@ -715,7 +713,6 @@ export default {
     // ==========================================
     if (safePath === '/api/beauticians') {
       try {
-        // 1. 取得所有美容師列表 (GET)
         if (request.method === 'GET') {
           const { results } = await env.reserve_db.prepare(
             "SELECT id, name FROM beauticians ORDER BY id ASC"
@@ -727,7 +724,6 @@ export default {
           });
         }
 
-        // 2. 新增美容師 (POST)
         if (request.method === 'POST') {
           const body = await request.json() as { name?: string };
           if (!body.name || !body.name.trim()) {
@@ -744,7 +740,6 @@ export default {
           });
         }
 
-        // 3. 修改美容師名字 (PUT)
         if (request.method === 'PUT') {
           const body = await request.json() as { id?: number; name?: string };
           if (!body.id || !body.name || !body.name.trim()) {
@@ -761,7 +756,6 @@ export default {
           });
         }
 
-        // 4. 刪除美容師 (DELETE)
         if (request.method === 'DELETE') {
           const id = url.searchParams.get('id');
           if (!id) {
@@ -785,7 +779,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 8：新增休假設定 (POST /api/holidays)[cite: 1]
+    // 路由 8：新增休假設定 (POST /api/holidays)
     // ==========================================
     if (request.method === 'POST' && safePath === '/api/holidays') {
       try {
@@ -824,7 +818,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 9：取得所有休假設定 (GET /api/holidays)[cite: 1]
+    // 路由 9：取得所有休假設定 (GET /api/holidays)
     // ==========================================
     if (request.method === 'GET' && safePath === '/api/holidays') {
       try {
@@ -846,7 +840,7 @@ export default {
     }
 
     // ==========================================
-    // 路由 10：刪除指定的休假設定 (DELETE /api/holidays)[cite: 1]
+    // 路由 10：刪除指定的休假設定 (DELETE /api/holidays)
     // ==========================================
     if (request.method === 'DELETE' && safePath === '/api/holidays') {
       try {
@@ -869,8 +863,13 @@ export default {
       }
     }
 
-    return new Response("歡迎來到預約系統 API 伺服器！", {
-      headers: { "Content-Type": "text/plain; charset=utf-8", ...corsHeaders }
+    // 🌟 最後防線：將原本的純文字轉換為 JSON，防止前端解析崩潰
+    return new Response(JSON.stringify({ 
+      error: "API 路由不存在或未正確回傳",
+      message: "歡迎來到預約系統 API 伺服器！" 
+    }), {
+      status: 404,
+      headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
     });
   },
   
