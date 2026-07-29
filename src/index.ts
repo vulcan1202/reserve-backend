@@ -342,6 +342,7 @@ export default {
             Appointments.end_time,
             Appointments.status,
             Appointments.notes AS notes,
+            Appointments.appointment_code,
             Appointments.beautician_id,
             beauticians.name AS beautician_name,
             Users.id AS user_id,
