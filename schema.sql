@@ -105,7 +105,7 @@ CREATE TABLE Appointments (
 CREATE TABLE client_questionnaires (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,               -- 關聯到 Users 會員表
-    how_to_know TEXT CHECK(how_to_know IN ('instagram', 'friend', 'search', 'other')) DEFAULT 'pending',                      -- 如何得知本店
+    how_to_know TEXT CHECK(how_to_know IN ('instagram', 'friend', 'search', 'other')) DEFAULT 'other',                      -- 如何得知本店
     history_of_treatments TEXT,             -- 以往經驗
     allergies TEXT,                         -- 過敏原 / 藥物過敏
     medical_history TEXT,                   -- 特殊病史 / 近期醫美狀況
@@ -113,6 +113,7 @@ CREATE TABLE client_questionnaires (
     concerns TEXT,                          -- 主要肌膚困擾
     Habit TEXT,                             -- 日常保養習慣
     notes TEXT,                             -- 其他補充備註
+    agreed_to_terms INTEGER DEFAULT 0 CHECK(agreed_to_terms IN (0,1))
     created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
     
     FOREIGN KEY (user_id) REFERENCES Users(id) ON DELETE CASCADE

@@ -5,10 +5,16 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
 export interface Env {
   reserve_db: D1Database;
-  LINE_ACCESS_TOKEN: string;
-  LINE_CHANNEL_ID: string;
-  LINE_CHANNEL_SECRET: string;
-  ENABLE_SIGNATURE_VERIFY?: string; // 可選，預設 true
+  
+  // --- Messaging API (機器人傳訊息與 Webhook) ---
+  LINE_ACCESS_TOKEN: string; 
+  LINE_MESSAGING_CHANNEL_SECRET: string;
+  
+  // --- LINE Login (網站登入用) ---
+  LINE_LOGIN_CHANNEL_ID: string; 
+  LINE_LOGIN_CHANNEL_SECRET: string;
+  
+  ENABLE_SIGNATURE_VERIFY?: string;
 }
 
 // ---------- 常量定義 ----------
@@ -76,6 +82,19 @@ interface HandlerContext {
   ctx: ExecutionContext;
   url: URL;
   headers: Record<string, string>;
+}
+
+interface QuestionnaireBody {
+  user_id: number;
+  how_to_know?: 'instagram' | 'friend' | 'search' | 'other';
+  history_of_treatments?: string;
+  allergies?: string;
+  medical_history?: string;
+  skin_type?: string;
+  concerns?: string;
+  Habit?: string;
+  notes?: string;
+  agreed_to_terms?: boolean;
 }
 
 // ========================================================
@@ -157,9 +176,25 @@ async function verifyLineSignature(rawBody: string, signatureHeader: string | nu
     false,
     ['sign']
   );
+  
   const sigBuffer = await crypto.subtle.sign('HMAC', key, encoder.encode(rawBody));
-  const sigHex = Array.from(new Uint8Array(sigBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-  return sigHex === signatureHeader;
+  const sigBase64 = btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
+  
+  return sigBase64 === signatureHeader;
+}
+
+/** 計算年齡（基於台灣時區） */
+function calculateAge(dateOfBirth: string | null): number | null {
+  if (!dateOfBirth) return null;
+  const birth = new Date(dateOfBirth);
+  if (isNaN(birth.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const m = now.getMonth() - birth.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) {
+    age--;
+  }
+  return age;
 }
 
 // ---------- 資料庫輔助查詢 ----------
@@ -177,18 +212,26 @@ async function getUserByPhone(env: Env, phone: string): Promise<UserRow | null> 
   ).bind(phone).first() as Promise<UserRow | null>;
 }
 
-/** 計算年齡（基於台灣時區） */
-function calculateAge(dateOfBirth: string | null): number | null {
-  if (!dateOfBirth) return null;
-  const birth = new Date(dateOfBirth);
-  if (isNaN(birth.getTime())) return null;
-  const now = new Date();
-  let age = now.getFullYear() - birth.getFullYear();
-  const m = now.getMonth() - birth.getMonth();
-  if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) {
-    age--;
-  }
-  return age;
+/** 取得會員問卷（依 user_id） */
+async function getQuestionnaireByUserId(env: Env, userId: number): Promise<any | null> {
+  return env.reserve_db.prepare(
+    `SELECT * FROM client_questionnaires WHERE user_id = ?`
+  ).bind(userId).first();
+}
+
+/** 檢查問卷是否存在（依 user_id） */
+async function questionnaireExists(env: Env, userId: number): Promise<boolean> {
+  const result = await env.reserve_db.prepare(
+    `SELECT id FROM client_questionnaires WHERE user_id = ?`
+  ).bind(userId).first();
+  return !!result;
+}
+
+/** 依 ID 查詢會員（用於驗證 user_id 是否存在） */
+async function getUserById(env: Env, userId: number): Promise<any | null> {
+  return env.reserve_db.prepare(
+    `SELECT id, last_name, first_name FROM Users WHERE id = ?`
+  ).bind(userId).first();
 }
 
 // ========================================================
@@ -466,8 +509,8 @@ async function handleLineLogin(ctx: HandlerContext): Promise<Response> {
         grant_type: 'authorization_code',
         code,
         redirect_uri: redirectUri,
-        client_id: env.LINE_CHANNEL_ID,
-        client_secret: env.LINE_CHANNEL_SECRET
+        client_id: env.LINE_LOGIN_CHANNEL_ID,      // 改用 LOGIN_CHANNEL_ID
+        client_secret: env.LINE_LOGIN_CHANNEL_SECRET // 改用 LOGIN_CHANNEL_SECRET
       }).toString()
     });
     const tokenData = (await tokenRes.json()) as LineTokenResponse;
@@ -629,6 +672,149 @@ async function handlePatchAppointment(ctx: HandlerContext): Promise<Response> {
   }
 }
 
+// ---------- 會員到店問卷 CRUD ----------
+
+/** 取得指定會員的問卷資料 (GET /api/questionnaires) */
+async function handleGetQuestionnaire(ctx: HandlerContext): Promise<Response> {
+  const { env, headers, url } = ctx;
+  try {
+    const userId = url.searchParams.get('user_id');
+    if (!userId) {
+      return errorResponse("缺少 user_id 參數", 400, headers);
+    }
+
+    const questionnaire = await getQuestionnaireByUserId(env, Number(userId));
+    return successResponse(questionnaire, undefined, 200, headers);
+  } catch (error: unknown) {
+    console.error("讀取問卷失敗：", error);
+    return errorResponse("讀取問卷資料失敗", 500, headers);
+  }
+}
+
+/** 建立或更新問卷 (POST /api/questionnaires) */
+async function handleUpsertQuestionnaire(ctx: HandlerContext): Promise<Response> {
+  const { request, env, headers } = ctx;
+  try {
+    const body = (await request.json()) as QuestionnaireBody;
+    const {
+      user_id,
+      how_to_know,
+      history_of_treatments,
+      allergies,
+      medical_history,
+      skin_type,
+      concerns,
+      Habit,
+      notes,
+      agreed_to_terms
+    } = body;
+
+    // 基本驗證
+    if (!user_id) {
+      return errorResponse("缺少 user_id", 400, headers);
+    }
+
+    // 檢查會員是否存在
+    const user = await getUserById(env, user_id);
+    if (!user) {
+      return errorResponse("指定的會員不存在", 404, headers);
+    }
+
+    // 檢查 how_to_know 是否在允許範圍內（如果有傳入）
+    const validHowToKnow = ['instagram', 'friend', 'search', 'other'];
+    if (how_to_know && !validHowToKnow.includes(how_to_know)) {
+      return errorResponse(
+        `how_to_know 必須是以下之一：${validHowToKnow.join(', ')}`,
+        400,
+        headers
+      );
+    }
+
+    // 檢查問券是否存在，決定 INSERT 或 UPDATE
+    const exists = await questionnaireExists(env, user_id);
+
+    let result: any;
+    if (exists) {
+      // 更新現有問卷
+      result = await env.reserve_db.prepare(
+      `UPDATE client_questionnaires SET
+        how_to_know = COALESCE(?, how_to_know),
+        history_of_treatments = COALESCE(?, history_of_treatments),
+        allergies = COALESCE(?, allergies),
+        medical_history = COALESCE(?, medical_history),
+        skin_type = COALESCE(?, skin_type),
+        concerns = COALESCE(?, concerns),
+        Habit = COALESCE(?, Habit),
+        notes = COALESCE(?, notes),
+        agreed_to_terms = COALESCE(?, agreed_to_terms)
+      WHERE user_id = ?
+      RETURNING *`
+    ).bind(
+      how_to_know || null,
+      history_of_treatments || null,
+      allergies || null,
+      medical_history || null,
+      skin_type || null,
+      concerns || null,
+      Habit || null,
+      notes || null,
+      agreed_to_terms !== undefined ? (agreed_to_terms ? 1 : 0) : null,
+      user_id
+    ).first();
+    } else {
+      // 新增問卷
+      result = await env.reserve_db.prepare(
+        `INSERT INTO client_questionnaires (
+          user_id, how_to_know, history_of_treatments, allergies,
+          medical_history, skin_type, concerns, Habit, notes, agreed_to_terms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING *`
+      ).bind(
+        user_id,
+        how_to_know || 'other',
+        history_of_treatments || null,
+        allergies || null,
+        medical_history || null,
+        skin_type || null,
+        concerns || null,
+        Habit || null,
+        notes || null,
+        agreed_to_terms ? 1 : 0
+      ).first();
+    }
+
+    return successResponse(result, exists ? '問卷更新成功' : '問卷建立成功', 200, headers);
+  } catch (error: unknown) {
+    console.error('問卷儲存失敗：', error);
+    return errorResponse('問卷儲存失敗', 500, headers);
+  }
+}
+
+/** 刪除問卷 (DELETE /api/questionnaires) */
+async function handleDeleteQuestionnaire(ctx: HandlerContext): Promise<Response> {
+  const { env, headers, url } = ctx;
+  try {
+    const userId = url.searchParams.get('user_id');
+    if (!userId) {
+      return errorResponse('缺少 user_id 參數', 400, headers);
+    }
+
+    const exists = await questionnaireExists(env, Number(userId));
+    if (!exists) {
+      return errorResponse('找不到該會員的問卷', 404, headers);
+    }
+
+    await env.reserve_db.prepare(
+      `DELETE FROM client_questionnaires WHERE user_id = ?`
+    ).bind(userId).run();
+
+    return successResponse({}, '問卷已刪除', 200, headers);
+  } catch (error: unknown) {
+    console.error('刪除問卷失敗：', error);
+    return errorResponse('刪除問卷失敗', 500, headers);
+  }
+}
+
 // ---------- LINE Webhook（主流程，已拆分責任） ----------
 async function handleLineWebhook(ctx: HandlerContext): Promise<Response> {
   const { request, env } = ctx;
@@ -639,9 +825,11 @@ async function handleLineWebhook(ctx: HandlerContext): Promise<Response> {
     const signature = request.headers.get('X-Line-Signature');
     if (!signature) return new Response('Unauthorized', { status: 401 });
     const rawBody = await request.text();
-    const isValid = await verifyLineSignature(rawBody, signature, env.LINE_CHANNEL_SECRET);
+    
+    // 👇 這裡改用 LINE_MESSAGING_CHANNEL_SECRET
+    const isValid = await verifyLineSignature(rawBody, signature, env.LINE_MESSAGING_CHANNEL_SECRET);
+    
     if (!isValid) return new Response('Invalid Signature', { status: 401 });
-    // 重新解析已讀取的 body
     const body = JSON.parse(rawBody) as LineWebhookBody;
     return processWebhookEvents(body, env);
   } else {
@@ -783,6 +971,9 @@ const routeHandlers: Record<string, RouteHandler> = {
   'POST:/api/holidays': handleHolidays,
   'DELETE:/api/holidays': handleHolidays,
   'POST:/api/line-webhook': handleLineWebhook,
+  'GET:/api/questionnaires': handleGetQuestionnaire,
+  'POST:/api/questionnaires': handleUpsertQuestionnaire,
+  'DELETE:/api/questionnaires': handleDeleteQuestionnaire,
 };
 
 // ========================================================
