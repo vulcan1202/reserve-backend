@@ -268,8 +268,8 @@ async function handleAppointmentVerification(
     replyText = `❌ 驗證失敗：您的 LINE 尚未綁定網站會員帳號。\n請先至網站註冊或登入後進行 LINE 綁定，才能驗證預約！`;
   } else {
     const appt = await env.reserve_db.prepare(
-      "SELECT id, user_id, status FROM Appointments WHERE appointment_code = ?"
-    ).bind(code).first() as AppointmentRow | null;
+      "SELECT id, user_id, status, date, start_time FROM Appointments WHERE appointment_code = ?"
+    ).bind(code).first() as (AppointmentRow & { date: string, start_time: string }) | null;
 
     if (!appt) {
       replyText = `❌ 找不到此預約編號，或該預約已超過 30 分鐘自動失效。\n請重新至網站預約。`;
@@ -281,7 +281,9 @@ async function handleAppointmentVerification(
       await env.reserve_db.prepare(
         "UPDATE Appointments SET status = ? WHERE id = ?"
       ).bind(AppointmentStatus.CONFIRMED, appt.id).run();
-      replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n期待您的光臨！`;
+      
+      // ✅ 修改回覆訊息：加入預約日期與時間
+      replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n📅 預約日期：${appt.date}\n⏰ 預約時間：${appt.start_time}\n\n期待您的光臨！`;
     } else {
       replyText = `❌ 此預約已被取消或狀態異常。`;
     }
