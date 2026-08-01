@@ -81,6 +81,27 @@ CREATE TABLE users_courses (
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
 );
 
+CREATE TABLE appointment_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_course_id INTEGER NOT NULL,            -- 關聯會員購買的特定課程包
+    
+    type TEXT NOT NULL CHECK(type IN ('usage', 'refund', 'expiry', 'adjustment')), 
+    -- 🌟 異動類型：上課消耗(usage), 財務退款扣除(refund), 逾期失效(expiry), 管理員手動調整(adjustment)
+    
+    use_count INTEGER NOT NULL,                 -- 🌟 變動堂數 (消耗或退款填正數，代表異動了幾堂)
+    balance_after INTEGER,                      -- 異動後的剩餘堂數快照 (對帳、Debug 救星)
+    
+    appointment_id INTEGER,                     -- 如果是上課消耗，關聯預約單 (選填，可為 NULL)
+    cash_transaction_id INTEGER,                -- 🌟 如果是退款，直接關聯現金收支表 (選填，可為 NULL)
+    
+    description TEXT,                           -- 備註 (例如: "客人辦理退費，剩餘 5 堂清空")
+    created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
+
+    FOREIGN KEY (appointment_id) REFERENCES Appointments(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_course_id) REFERENCES users_courses(id) ON DELETE CASCADE,
+    FOREIGN KEY (cash_transaction_id) REFERENCES cash_transactions(id) ON DELETE SET NULL
+);
+
 -- 5. 建立預約紀錄表 (Appointments)
 CREATE TABLE Appointments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +134,7 @@ CREATE TABLE client_questionnaires (
     concerns TEXT,                          -- 主要肌膚困擾
     Habit TEXT,                             -- 日常保養習慣
     notes TEXT,                             -- 其他補充備註
-    agreed_to_terms INTEGER DEFAULT 0 CHECK(agreed_to_terms IN (0,1))
+    agreed_to_terms INTEGER DEFAULT 0 CHECK(agreed_to_terms IN (0,1)),
     created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
     
     FOREIGN KEY (user_id) REFERENCES Users(id) ON DELETE CASCADE
@@ -199,6 +220,9 @@ CREATE TABLE ShopHolidays (
 CREATE INDEX idx_appointments_user_id ON Appointments(user_id);
 CREATE INDEX idx_appointments_date_time ON Appointments(date, start_time);
 CREATE INDEX idx_appointments_status ON Appointments(status);
+CREATE INDEX idx_appt_courses_appt ON appointment_courses(appointment_id);
+CREATE INDEX idx_appt_courses_ucourse ON appointment_courses(user_course_id);
+CREATE INDEX idx_appt_courses_type ON appointment_courses(type);
 
 -- 店家休假查詢優化
 CREATE INDEX idx_holidays_date ON ShopHolidays(date);
