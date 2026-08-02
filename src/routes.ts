@@ -54,6 +54,8 @@ import {
 import {
   handleGetInventoryTransactions,
   handleCreateInventoryTransaction,
+  handleUpdateInventoryTransaction,
+  handleDeleteInventoryTransaction,
 } from "./handlers/inventory";
 import {
   handleGetRevenueRecognitions,
@@ -110,7 +112,8 @@ export const routeHandlers: Record<string, RouteHandler> = {
   'POST:/api/products': handleCreateProduct,
   'PUT:/api/products': handleUpdateProduct,
   'DELETE:/api/products': handleDeleteProduct,
-
+  'PUT:/api/inventory-transactions': handleUpdateInventoryTransaction,   // 🌟 確保這行有註冊！
+  'DELETE:/api/inventory-transactions': handleDeleteInventoryTransaction, // 🌟 確保這行有註冊！
   'GET:/api/inventory-transactions': handleGetInventoryTransactions,
   'POST:/api/inventory-transactions': handleCreateInventoryTransaction,
 

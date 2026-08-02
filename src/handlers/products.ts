@@ -67,17 +67,42 @@ export async function handleUpdateProduct(ctx: HandlerContext): Promise<Response
   }
 }
 
-/** 刪除產品 */
+/** 刪除產品（同時清除：庫存異動 + 相關現金收支紀錄 + 相關營收認列紀錄） */
 export async function handleDeleteProduct(ctx: HandlerContext): Promise<Response> {
   const { env, headers, url } = ctx;
   try {
     const id = url.searchParams.get('id');
     if (!id) return errorResponse("缺少產品 ID", 400, headers);
 
-    await env.reserve_db.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
-    return successResponse({}, "產品已刪除", 200, headers);
+    // 1. 檢查產品是否存在
+    const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(id).first() as any;
+    if (!product) return errorResponse("找不到該產品", 404, headers);
+
+    const productName = product.name;
+
+    // 2. 建立批次刪除 SQL 語句
+    // 透過描述（LIKE '[進貨] 產品名%' / '[銷售] 產品名%'）來精準連帶清理財務紀錄
+    const statements = [
+      // 刪除產品本身（SQLite ON DELETE CASCADE 會自動連帶刪除 inventory_transactions）
+      env.reserve_db.prepare("DELETE FROM products WHERE id = ?").bind(id),
+
+      // 清理現金收支表 (cash_transactions) 中關於此產品的進貨成本與銷售收入
+      env.reserve_db.prepare(
+        "DELETE FROM cash_transactions WHERE description LIKE ? OR description LIKE ?"
+      ).bind(`[進貨] ${productName}%`, `[銷售] ${productName}%`),
+
+      // 清理實質營收表 (revenue_recognitions) 中關於此產品的銷貨營收
+      env.reserve_db.prepare(
+        "DELETE FROM revenue_recognitions WHERE source_type = 'product_sale' AND description LIKE ?"
+      ).bind(`[銷貨營收] ${productName}%`)
+    ];
+
+    // 3. 執行批次原子交易 (Batch Transaction)
+    await env.reserve_db.batch(statements);
+    
+    return successResponse({}, "產品、庫存異動及其連動的財務紀錄已一併清除", 200, headers);
   } catch (error: unknown) {
-    console.error("刪除產品失敗：", error);
-    return errorResponse("刪除產品失敗", 500, headers);
+    console.error("刪除產品及連帶財務資料失敗：", error);
+    return errorResponse("刪除產品失敗，請確認是否有其他關聯資料", 500, headers);
   }
 }
