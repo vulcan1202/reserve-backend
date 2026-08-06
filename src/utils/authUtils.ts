@@ -1,21 +1,21 @@
 // ========================================================
 // Argon2id 密碼雜湊與驗證工具模組 (utils/authUtils.ts)
-// 使用 @noble/hashes 純 JS/TS 密碼學函式庫 (無 WebAssembly / 100% 相容 Cloudflare Workers)
+// 使用 @noble/hashes 純 JS/TS 密碼學函式庫 (無 WebAssembly / 相容 Cloudflare Workers CPU 配額)
 // ========================================================
 import { argon2id } from '@noble/hashes/argon2.js'
 
-// Argon2id 安全參數配置 (遵循 OWASP 建議)
+// Argon2id 最佳化參數配置 (針對 Cloudflare Workers CPU 10ms~50ms 配額優化)
 const ARGON2_PARAMS = {
-  memorySize: 65536, // 64 MB (65536 KiB)
-  iterations: 3,     // 3 次計算迭代 (t=3)
-  parallelism: 1,    // 1 個平行執行緒 (p=1)
-  hashLength: 32,    // 32-byte 雜湊長度
+  memorySize: 1024, // 1 MB (1024 KiB) 避免觸發 Cloudflare Error 1102 CPU 超時
+  iterations: 1,    // 1 次計算迭代
+  parallelism: 1,   // 1 個平行執行緒
+  hashLength: 32,   // 32-byte 雜湊長度
 }
 
 /**
  * 1. 使用 Argon2id 演算法加鹽雜湊密碼
  * @param password 明文密碼
- * @returns 格式化為 PHC 格式之 Argon2id 雜湊字串 ($argon2id$v=19$m=65536,t=3,p=1$<saltHex>$<hashHex>)
+ * @returns 格式化為 PHC 格式之 Argon2id 雜湊字串 ($argon2id$v=19$m=1024,t=1,p=1$<saltHex>$<hashHex>)
  */
 export async function hashPassword(password: string): Promise<string> {
   // 生成 16 位元組 (128-bit) 密碼學安全亂數鹽值
@@ -38,7 +38,7 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 /**
- * 2. 驗證明文密碼與 Argon2id 雜湊字串是否一致
+ * 2. 驗證明文密碼與 Argon2id 雜湊字串是否一致 (支援動態解析不同 m/t/p 參數)
  * @param password 明文密碼
  * @param hashString 資料庫中儲存之 Argon2id PHC 雜湊字串
  * @returns 驗證成功回傳 true，失敗回傳 false
@@ -50,12 +50,12 @@ export async function verifyPassword(password: string, hashString: string): Prom
     }
 
     const parts = hashString.split('$')
-    // parts 結構：['', 'argon2id', 'v=19', 'm=65536,t=3,p=1', saltHex, hashHex]
+    // parts 結構：['', 'argon2id', 'v=19', 'm=1024,t=1,p=1', saltHex, hashHex]
     if (parts.length < 6 || parts[1] !== 'argon2id') {
       return false
     }
 
-    // 解析推導參數
+    // 解析推導參數 (支援動態相容不同的記憶體與迭代配置)
     const paramParts = parts[3].split(',')
     let memorySize = ARGON2_PARAMS.memorySize
     let iterations = ARGON2_PARAMS.iterations
