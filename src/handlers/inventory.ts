@@ -9,7 +9,7 @@ function getStockChange(type: string, quantity: number): number {
   const qty = Math.abs(quantity);
   if (type === 'purchase') return qty;
   if (type === 'sale' || type === 'usage') return -qty;
-  if (type === 'adjustment') return quantity; // 盤點可正可負
+  if (type === 'adjustment') return quantity; // 盤點重置可為正、負或 0
   return 0;
 }
 
@@ -24,8 +24,8 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
     if (!type || !['purchase', 'sale', 'usage', 'adjustment'].includes(type)) {
       return errorResponse("無效的異動類型", 400, headers);
     }
-    // 🌟 檢查變動數量（盤點 adjustment 可為負數，但不能為 0）
-    if (typeof quantity !== 'number' || isNaN(quantity) || quantity === 0) {
+    // 🌟 盤點 (adjustment) 數量可設定為 0 或負數，其它類型數量不可為 0
+    if (typeof quantity !== 'number' || isNaN(quantity) || (type !== 'adjustment' && quantity === 0)) {
       return errorResponse("變動數量不能為 0", 400, headers);
     }
     if (!date) return errorResponse("請指定發生日期", 400, headers);
@@ -33,7 +33,9 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
     const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(product_id).first() as any;
     if (!product) return errorResponse("找不到對應的產品", 404, headers);
 
-    const total_amount = Math.abs(quantity * unit_price);
+    // 🌟 盤點與耗損單價一律歸零，且不影響財務報表
+    const finalUnitPrice = (type === 'adjustment' || type === 'usage') ? 0 : unit_price;
+    const total_amount = (type === 'adjustment' || type === 'usage') ? 0 : Math.abs(quantity * finalUnitPrice);
     const stockChange = getStockChange(type, quantity);
 
     const statements: any[] = [];
@@ -43,9 +45,8 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
       env.reserve_db.prepare(
         `INSERT INTO inventory_transactions (product_id, type, quantity, unit_price, total_amount, user_id, description, date)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-      ).bind(product_id, type, quantity, unit_price, total_amount, user_id || null, description || null, date)
+      ).bind(product_id, type, quantity, finalUnitPrice, total_amount, user_id || null, description || null, date)
     );
-    
 
     // 2. 更新產品庫存
     statements.push(
@@ -54,9 +55,8 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
       ).bind(stockChange, product_id)
     );
 
-    // 3. 連結財務報表 (僅 purchase 與 sale)
+    // 3. 連結財務報表 (僅 purchase 與 sale 產生財務紀錄，adjustment 盤點 100% 不影響財務表)
     if (type === 'purchase') {
-      // 進貨：增加成本支出
       statements.push(
         env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
@@ -64,7 +64,6 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
         ).bind(total_amount, user_id || null, `[進貨] ${product.name} x${quantity} (${description || ''})`, date)
       );
     } else if (type === 'sale') {
-      // 銷售：增加現金收入 + 認列實質營收
       statements.push(
         env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
@@ -83,7 +82,7 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
     }
 
     await env.reserve_db.batch(statements);
-    return successResponse({}, "庫存異動已登記並自動連動財務", 201, headers);
+    return successResponse({}, "庫存異動已登記", 201, headers);
   } catch (error: unknown) {
     console.error("庫存異動失敗：", error);
     return errorResponse("登記庫存異動失敗", 500, headers);
@@ -97,23 +96,21 @@ export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Pro
     const body = (await request.json()) as InventoryTransactionBody & { id: number };
     const { id, type, quantity, unit_price, user_id, description, date } = body;
     if (!id) return errorResponse("缺少異動紀錄 ID", 400, headers);
-    // 🌟 檢查變動數量（盤點 adjustment 可為負數，但不能為 0）
-    if (typeof quantity !== 'number' || isNaN(quantity) || quantity === 0) {
+    // 🌟 盤點 (adjustment) 數量可設定為 0
+    if (typeof quantity !== 'number' || isNaN(quantity) || (type !== 'adjustment' && quantity === 0)) {
       return errorResponse("變動數量不能為 0", 400, headers);
     }
 
     const oldTrans = await env.reserve_db.prepare("SELECT * FROM inventory_transactions WHERE id = ?").bind(id).first() as any;
     if (!oldTrans) return errorResponse("找不到該筆異動紀錄", 404, headers);
 
-    const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(oldTrans.product_id).first() as any;
-
     // 計算原異動量逆向回滾與新異動量
     const revertChange = -getStockChange(oldTrans.type, oldTrans.quantity);
     const newChange = getStockChange(type, quantity);
     const netStockChange = revertChange + newChange;
 
-    const total_amount = Math.abs(quantity * unit_price);
-
+    const finalUnitPrice = (type === 'adjustment' || type === 'usage') ? 0 : unit_price;
+    const total_amount = (type === 'adjustment' || type === 'usage') ? 0 : Math.abs(quantity * finalUnitPrice);
 
     const statements: any[] = [];
 
@@ -123,7 +120,7 @@ export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Pro
         `UPDATE inventory_transactions 
          SET type = ?, quantity = ?, unit_price = ?, total_amount = ?, user_id = ?, description = ?, date = ?
          WHERE id = ?`
-      ).bind(type, quantity, unit_price, total_amount, user_id || null, description || null, date, id)
+      ).bind(type, quantity, finalUnitPrice, total_amount, user_id || null, description || null, date, id)
     );
 
     // 2. 恢復舊庫存並更新新庫存
@@ -153,17 +150,13 @@ export async function handleDeleteInventoryTransaction(ctx: HandlerContext): Pro
 
     const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(trans.product_id).first() as any;
 
-    // 計算刪除時逆向恢復的庫存量
     const revertChange = -getStockChange(trans.type, trans.quantity);
 
     const statements: any[] = [
-      // 1. 刪除異動紀錄
       env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE id = ?").bind(id),
-      // 2. 還原產品庫存
       env.reserve_db.prepare("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").bind(revertChange, trans.product_id)
     ];
 
-    // 3. 清理當初寫入的財務紀錄
     if (product) {
       if (trans.type === 'purchase') {
         statements.push(
