@@ -27,6 +27,7 @@ export function buildCorsHeaders(requestOrigin: string): Record<string, string> 
     "Access-Control-Allow-Origin": validOrigin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Credentials": "true",
   };
 }
 

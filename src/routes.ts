@@ -62,11 +62,23 @@ import {
   handleCreateRevenueRecognition,
 } from "./handlers/revenue";
 import { handleGetFinancialSummary } from "./handlers/financial";
+import {
+  handleAdminLogin,
+  handleAdminLogout,
+  handleAdminMe,
+  handleAdminRegister,
+} from "./handlers/adminAuth";
 
 export type RouteHandler = (ctx: HandlerContext) => Promise<Response>;
 
 export const routeHandlers: Record<string, RouteHandler> = {
   'GET:/': handleRoot,
+
+  // --- 🔐 管理員驗證 (Argon2id + Cookie Session) ---
+  'POST:/api/admin/login': handleAdminLogin,
+  'POST:/api/admin/logout': handleAdminLogout,
+  'GET:/api/admin/me': handleAdminMe,
+  'POST:/api/admin/register': handleAdminRegister,
 
   // --- 👤 會員 / 登入 ---[cite: 20]
   'POST:/api/users': handleRegister,
