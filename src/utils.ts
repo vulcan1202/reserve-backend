@@ -26,7 +26,7 @@ export function buildCorsHeaders(requestOrigin: string): Record<string, string> 
   return {
     "Access-Control-Allow-Origin": validOrigin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
     "Access-Control-Allow-Credentials": "true",
   };
 }
