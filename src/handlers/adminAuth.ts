@@ -190,7 +190,7 @@ export async function handleAdminMe(ctx: HandlerContext): Promise<Response> {
   const { headers } = ctx;
   const admin = await authenticateAdmin(ctx);
   if (!admin) {
-    return errorResponse("未登入或 Session 已失效，請重新登入", 401, headers);
+    return successResponse({ admin: null }, "未登入或 Session 已失效", 200, headers);
   }
 
   return successResponse({ admin }, undefined, 200, headers);
