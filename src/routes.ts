@@ -49,7 +49,7 @@ import {
   handleCreateUserCourse,
   handleUpdateUserCourse,
   handleDeleteUserCourse,
-  handleRefundUserCourse, // 🌟 補上引入會員退款 Handler
+  handleRefundUserCourse,
 } from "./handlers/usersCourses";
 import {
   handleGetInventoryTransactions,
@@ -68,6 +68,11 @@ import {
   handleAdminMe,
   handleAdminRegister,
 } from "./handlers/adminAuth";
+import {
+  handleGetAdminNotifications,
+  handleMarkAdminNotificationRead,
+  handleDeleteAdminNotification,
+} from "./handlers/adminNotifications";
 
 export type RouteHandler = (ctx: HandlerContext) => Promise<Response>;
 
@@ -80,7 +85,12 @@ export const routeHandlers: Record<string, RouteHandler> = {
   'GET:/api/admin/me': handleAdminMe,
   'POST:/api/admin/register': handleAdminRegister,
 
-  // --- 👤 會員 / 登入 ---[cite: 20]
+  // --- 🔔 管理員個人化通知與物理刪除 (Admin Notifications) ---
+  'GET:/api/admin/notifications': handleGetAdminNotifications,
+  'POST:/api/admin/notifications/mark-read': handleMarkAdminNotificationRead,
+  'DELETE:/api/admin/notifications': handleDeleteAdminNotification,
+
+  // --- 👤 會員 / 登入 ---
   'POST:/api/users': handleRegister,
   'PUT:/api/users': handleUpdateUser,
   'GET:/api/users': handleGetUsers,
@@ -88,64 +98,64 @@ export const routeHandlers: Record<string, RouteHandler> = {
   'POST:/api/liff-login': handleLiffLogin,
   'POST:/api/line-login': handleLineLogin,
 
-  // --- 📅 預約 ---[cite: 20]
+  // --- 📅 預約 ---
   'POST:/api/appointments': handleCreateAppointment,
   'GET:/api/appointments': handleGetAppointments,
   'PATCH:/api/appointments': handlePatchAppointment,
   'POST:/api/appointments/complete': handleCompleteAppointment,
 
-  // --- 💇 美容師 ---[cite: 20]
+  // --- 💇 美容師 ---
   'GET:/api/beauticians': handleBeauticians,
   'POST:/api/beauticians': handleBeauticians,
   'PUT:/api/beauticians': handleBeauticians,
   'DELETE:/api/beauticians': handleBeauticians,
 
-  // --- 🏖️ 休假設定 ---[cite: 20]
+  // --- 🏖️ 休假設定 ---
   'GET:/api/holidays': handleHolidays,
   'POST:/api/holidays': handleHolidays,
   'DELETE:/api/holidays': handleHolidays,
 
-  // --- 🤖 LINE Webhook ---[cite: 20]
+  // --- 🤖 LINE Webhook ---
   'POST:/api/line-webhook': handleLineWebhook,
 
-  // --- 📝 會員到店問卷 ---[cite: 20]
+  // --- 📝 會員到店問卷 ---
   'GET:/api/questionnaires': handleGetQuestionnaire,
   'POST:/api/questionnaires': handleUpsertQuestionnaire,
   'DELETE:/api/questionnaires': handleDeleteQuestionnaire,
 
-  // --- 💰 現金收支 API (Cash Transactions) ---[cite: 20]
+  // --- 💰 現金收支 API (Cash Transactions) ---
   'GET:/api/cash-transactions': handleGetCashTransactions,
   'POST:/api/cash-transactions': handleCreateCashTransaction,
   'PUT:/api/cash-transactions': handleUpdateCashTransaction,
   'DELETE:/api/cash-transactions': handleDeleteCashTransaction,
 
-  // --- 📦 產品與進銷存 API (Products & Inventory) ---[cite: 20]
+  // --- 📦 產品與進銷存 API (Products & Inventory) ---
   'GET:/api/products': handleGetProducts,
   'POST:/api/products': handleCreateProduct,
   'PUT:/api/products': handleUpdateProduct,
   'DELETE:/api/products': handleDeleteProduct,
-  'PUT:/api/inventory-transactions': handleUpdateInventoryTransaction,   // 🌟 確保這行有註冊！
-  'DELETE:/api/inventory-transactions': handleDeleteInventoryTransaction, // 🌟 確保這行有註冊！
+  'PUT:/api/inventory-transactions': handleUpdateInventoryTransaction,
+  'DELETE:/api/inventory-transactions': handleDeleteInventoryTransaction,
   'GET:/api/inventory-transactions': handleGetInventoryTransactions,
   'POST:/api/inventory-transactions': handleCreateInventoryTransaction,
 
-  // --- 📚 課程方案 API (Courses) ---[cite: 20]
+  // --- 📚 課程方案 API (Courses) ---
   'GET:/api/courses': handleGetCourses,
   'POST:/api/courses': handleCreateCourse,
   'PUT:/api/courses': handleUpdateCourse,
   'DELETE:/api/courses': handleDeleteCourse,
 
-  // --- 🎫 會員已購買課程 API (Users Courses) ---[cite: 20]
+  // --- 🎫 會員已購買課程 API (Users Courses) ---
   'GET:/api/users-courses': handleGetUsersCourses,
   'POST:/api/users-courses': handleCreateUserCourse,
   'PUT:/api/users-courses': handleUpdateUserCourse,
   'DELETE:/api/users-courses': handleDeleteUserCourse,
-  'POST:/api/users-courses/refund': handleRefundUserCourse, // 🌟 補上會員退款路由對應
+  'POST:/api/users-courses/refund': handleRefundUserCourse,
 
-  // --- 📈 實質營收認列 API (Revenue Recognitions) ---[cite: 20]
+  // --- 📈 實質營收認列 API (Revenue Recognitions) ---
   'GET:/api/revenue-recognitions': handleGetRevenueRecognitions,
   'POST:/api/revenue-recognitions': handleCreateRevenueRecognition,
 
-  // --- 📊 財務綜合損益報表 API (Financial Reports) ---[cite: 20]
+  // --- 📊 財務綜合損益報表 API (Financial Reports) ---
   'GET:/api/financial-summary': handleGetFinancialSummary,
 };
