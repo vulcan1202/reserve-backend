@@ -160,7 +160,7 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
           created_at AS time
         FROM admin_notifications
         WHERE admin_id = ?
-        ORDER BY id DESC
+        ORDER BY created_at DESC, id DESC
       `).bind(adminId).all<any>();
 
       notifications = (res.results || []).map(item => ({
