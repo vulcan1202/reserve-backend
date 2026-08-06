@@ -33,10 +33,17 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
     const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(product_id).first() as any;
     if (!product) return errorResponse("找不到對應的產品", 404, headers);
 
+    const stockChange = getStockChange(type, quantity);
+    const newStockQuantity = product.stock_quantity + stockChange;
+
+    // 🌟 核心防護：產品剩餘庫存數量不可小於 0
+    if (newStockQuantity < 0) {
+      return errorResponse(`庫存不足！「${product.name}」目前庫存為 ${product.stock_quantity} 件，異動後剩餘數量不能小於 0`, 400, headers);
+    }
+
     // 🌟 盤點與耗損單價一律歸零，且不影響財務報表
     const finalUnitPrice = (type === 'adjustment' || type === 'usage') ? 0 : unit_price;
     const total_amount = (type === 'adjustment' || type === 'usage') ? 0 : Math.abs(quantity * finalUnitPrice);
-    const stockChange = getStockChange(type, quantity);
 
     const statements: any[] = [];
 
@@ -55,7 +62,7 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
       ).bind(stockChange, product_id)
     );
 
-    // 3. 連結財務報表 (僅 purchase 與 sale 產生財務紀錄，adjustment 盤點 100% 不影響財務表)
+    // 3. 連結財務報表 (僅 purchase 與 sale 產生財務紀錄)
     if (type === 'purchase') {
       statements.push(
         env.reserve_db.prepare(
@@ -96,7 +103,6 @@ export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Pro
     const body = (await request.json()) as InventoryTransactionBody & { id: number };
     const { id, type, quantity, unit_price, user_id, description, date } = body;
     if (!id) return errorResponse("缺少異動紀錄 ID", 400, headers);
-    // 🌟 盤點 (adjustment) 數量可設定為 0
     if (typeof quantity !== 'number' || isNaN(quantity) || (type !== 'adjustment' && quantity === 0)) {
       return errorResponse("變動數量不能為 0", 400, headers);
     }
@@ -104,10 +110,16 @@ export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Pro
     const oldTrans = await env.reserve_db.prepare("SELECT * FROM inventory_transactions WHERE id = ?").bind(id).first() as any;
     if (!oldTrans) return errorResponse("找不到該筆異動紀錄", 404, headers);
 
+    const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(oldTrans.product_id).first() as any;
+
     // 計算原異動量逆向回滾與新異動量
     const revertChange = -getStockChange(oldTrans.type, oldTrans.quantity);
     const newChange = getStockChange(type, quantity);
     const netStockChange = revertChange + newChange;
+
+    if (product && (product.stock_quantity + netStockChange) < 0) {
+      return errorResponse(`更新失敗：調整後「${product.name}」剩餘庫存為 ${product.stock_quantity + netStockChange} 件 (不能小於 0)`, 400, headers);
+    }
 
     const finalUnitPrice = (type === 'adjustment' || type === 'usage') ? 0 : unit_price;
     const total_amount = (type === 'adjustment' || type === 'usage') ? 0 : Math.abs(quantity * finalUnitPrice);
@@ -151,6 +163,10 @@ export async function handleDeleteInventoryTransaction(ctx: HandlerContext): Pro
     const product = await env.reserve_db.prepare("SELECT * FROM products WHERE id = ?").bind(trans.product_id).first() as any;
 
     const revertChange = -getStockChange(trans.type, trans.quantity);
+
+    if (product && (product.stock_quantity + revertChange) < 0) {
+      return errorResponse(`無法刪除：刪除還原後「${product.name}」剩餘庫存將變成 ${product.stock_quantity + revertChange} 件 (不能小於 0)`, 400, headers);
+    }
 
     const statements: any[] = [
       env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE id = ?").bind(id),
