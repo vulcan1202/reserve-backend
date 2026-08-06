@@ -76,7 +76,7 @@ export async function handleGetAppointments(ctx: HandlerContext): Promise<Respon
     let query = `
       SELECT 
         Appointments.id, Appointments.date, Appointments.start_time, Appointments.end_time,
-        Appointments.status, Appointments.notes AS notes, Appointments.appointment_code,
+        Appointments.status, Appointments.notes AS notes, Appointments.appointment_code, Appointments.created_at,
         Appointments.beautician_id, beauticians.name AS beautician_name,
         Users.id AS user_id, Users.last_name || Users.first_name AS client_name,
         Users.phone AS client_phone, Users.email AS client_email, Users.gender AS client_gender,
