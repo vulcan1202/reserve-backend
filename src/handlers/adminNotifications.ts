@@ -71,108 +71,117 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
   const admin = await authenticateAdmin(ctx);
   const adminId = admin ? admin.id : 1;
 
-  const { env } = ctx;
+  const { env, headers } = ctx;
 
   try {
     const taiwanTime = getTaiwanDateTimeDetails();
 
     // 🌟 1. 最新預約 (過濾掉 pending，只通知 confirmed 與 cancelled/cancel)
-    const appts = await env.reserve_db.prepare(`
-      SELECT 
-        Appointments.id, Appointments.date, Appointments.start_time, Appointments.appointment_code, Appointments.status, Appointments.created_at,
-        Users.last_name || Users.first_name AS client_name
-      FROM Appointments 
-      JOIN Users ON Appointments.user_id = Users.id
-      WHERE Appointments.status IN ('confirmed', 'cancelled', 'cancel') 
-      ORDER BY Appointments.id DESC LIMIT 5
-    `).all<any>();
+    try {
+      const appts = await env.reserve_db.prepare(`
+        SELECT 
+          Appointments.id, Appointments.date, Appointments.start_time, Appointments.appointment_code, Appointments.status, Appointments.created_at,
+          Users.last_name || Users.first_name AS client_name
+        FROM Appointments 
+        JOIN Users ON Appointments.user_id = Users.id
+        WHERE Appointments.status IN ('confirmed', 'cancelled', 'cancel') 
+        ORDER BY Appointments.id DESC LIMIT 5
+      `).all<any>();
 
-    if (appts.results) {
-      for (const a of appts.results) {
-        const isCancelled = (a.status === 'cancelled' || a.status === 'cancel');
-        const notifId = `appt-${isCancelled ? 'cancelled' : 'confirmed'}-${a.id}`;
-        const title = isCancelled 
-          ? `【預約取消】${a.client_name || '客戶'} 的預約已取消`
-          : `【預約確認】${a.client_name || '客戶'} 的預約已確認`;
-        const message = `預約時間：${a.date} ${a.start_time} | 預約單號：${a.appointment_code}`;
-        const badgeText = isCancelled ? '預約已取消' : '預約已確認';
-        const badgeClass = isCancelled ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200';
-        const icon = isCancelled ? 'mdi:calendar-remove' : 'mdi:calendar-check';
-        const iconBg = isCancelled ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-600 border border-emerald-200';
-        const link = '/Appointment';
+      if (appts.results) {
+        for (const a of appts.results) {
+          const isCancelled = (a.status === 'cancelled' || a.status === 'cancel');
+          const notifId = `appt-${isCancelled ? 'cancelled' : 'confirmed'}-${a.id}`;
+          const title = isCancelled 
+            ? `【預約取消】${a.client_name || '客戶'} 的預約已取消`
+            : `【預約確認】${a.client_name || '客戶'} 的預約已確認`;
+          const message = `預約時間：${a.date} ${a.start_time} | 預約單號：${a.appointment_code}`;
+          const badgeText = isCancelled ? '預約已取消' : '預約已確認';
+          const badgeClass = isCancelled ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200';
+          const icon = isCancelled ? 'mdi:calendar-remove' : 'mdi:calendar-check';
+          const iconBg = isCancelled ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-600 border border-emerald-200';
+          const link = '/Appointment';
+
+          await env.reserve_db.prepare(`
+            INSERT OR IGNORE INTO admin_notifications 
+            (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
+            VALUES (?, ?, 'appointment', ?, ?, ?, ?, ?, ?, ?, 0)
+          `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+        }
+      }
+
+      // 2. 週財報推播 (禮拜日 22:00 以後)
+      if (taiwanTime.dayOfWeek === 0 && taiwanTime.hour >= 22) {
+        const notifId = `fin-weekly-${taiwanTime.dateStr}`;
+        const title = `【週財報推播】本週門市營收實質履約統計`;
+        const message = `禮拜日 22:00 定時推播：當週門市營運報告已完成計算。`;
+        const badgeText = '週日 22:00 推播';
+        const badgeClass = 'bg-purple-100 text-purple-800 border-purple-200';
+        const icon = 'mdi:chart-timeline-variant-shimmer';
+        const iconBg = 'bg-purple-50 text-purple-600 border border-purple-200';
+        const link = '/analytics';
 
         await env.reserve_db.prepare(`
           INSERT OR IGNORE INTO admin_notifications 
           (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-          VALUES (?, ?, 'appointment', ?, ?, ?, ?, ?, ?, ?, 0)
+          VALUES (?, ?, 'financial_weekly', ?, ?, ?, ?, ?, ?, ?, 0)
         `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
       }
-    }
 
-    // 2. 週財報推播 (禮拜日 22:00 以後)
-    if (taiwanTime.dayOfWeek === 0 && taiwanTime.hour >= 22) {
-      const notifId = `fin-weekly-${taiwanTime.dateStr}`;
-      const title = `【週財報推播】本週門市營收實質履約統計`;
-      const message = `禮拜日 22:00 定時推播：當週門市營運報告已完成計算。`;
-      const badgeText = '週日 22:00 推播';
-      const badgeClass = 'bg-purple-100 text-purple-800 border-purple-200';
-      const icon = 'mdi:chart-timeline-variant-shimmer';
-      const iconBg = 'bg-purple-50 text-purple-600 border border-purple-200';
-      const link = '/analytics';
+      // 3. 月財報推播 (月底 22:00 以後)
+      if (taiwanTime.isLastDayOfMonth && taiwanTime.hour >= 22) {
+        const notifId = `fin-monthly-${taiwanTime.year}-${taiwanTime.month}`;
+        const title = `【月財報推播】${taiwanTime.year}-${taiwanTime.month} 月份門市營運綜合結算`;
+        const message = `月底 22:00 定時推播：當月綜合財務與營收結算已更新。`;
+        const badgeText = '月底 22:00 推播';
+        const badgeClass = 'bg-amber-100 text-amber-800 border-amber-200';
+        const icon = 'mdi:finance';
+        const iconBg = 'bg-amber-50 text-amber-600 border border-amber-200';
+        const link = '/finance';
 
-      await env.reserve_db.prepare(`
-        INSERT OR IGNORE INTO admin_notifications 
-        (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-        VALUES (?, ?, 'financial_weekly', ?, ?, ?, ?, ?, ?, ?, 0)
-      `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
-    }
-
-    // 3. 月財報推播 (月底 22:00 以後)
-    if (taiwanTime.isLastDayOfMonth && taiwanTime.hour >= 22) {
-      const notifId = `fin-monthly-${taiwanTime.year}-${taiwanTime.month}`;
-      const title = `【月財報推播】${taiwanTime.year}-${taiwanTime.month} 月份門市營運綜合結算`;
-      const message = `月底 22:00 定時推播：當月綜合財務與營收結算已更新。`;
-      const badgeText = '月底 22:00 推播';
-      const badgeClass = 'bg-amber-100 text-amber-800 border-amber-200';
-      const icon = 'mdi:finance';
-      const iconBg = 'bg-amber-50 text-amber-600 border border-amber-200';
-      const link = '/finance';
-
-      await env.reserve_db.prepare(`
-        INSERT OR IGNORE INTO admin_notifications 
-        (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-        VALUES (?, ?, 'financial_monthly', ?, ?, ?, ?, ?, ?, ?, 0)
-      `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+        await env.reserve_db.prepare(`
+          INSERT OR IGNORE INTO admin_notifications 
+          (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
+          VALUES (?, ?, 'financial_monthly', ?, ?, ?, ?, ?, ?, ?, 0)
+        `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+      }
+    } catch (dbErr) {
+      console.warn("admin_notifications table might not exist yet:", dbErr);
     }
 
     // 從 D1 撈取該管理員未被物理刪除的所有通知列表
-    const res = await env.reserve_db.prepare(`
-      SELECT 
-        notification_id AS id,
-        type,
-        title,
-        message,
-        link,
-        badge_text AS badgeText,
-        badge_class AS badgeClass,
-        icon,
-        icon_bg AS iconBg,
-        is_read,
-        created_at AS time
-      FROM admin_notifications
-      WHERE admin_id = ?
-      ORDER BY id DESC
-    `).bind(adminId).all<any>();
+    let notifications: any[] = [];
+    try {
+      const res = await env.reserve_db.prepare(`
+        SELECT 
+          notification_id AS id,
+          type,
+          title,
+          message,
+          link,
+          badge_text AS badgeText,
+          badge_class AS badgeClass,
+          icon,
+          icon_bg AS iconBg,
+          is_read,
+          created_at AS time
+        FROM admin_notifications
+        WHERE admin_id = ?
+        ORDER BY id DESC
+      `).bind(adminId).all<any>();
 
-    const notifications = (res.results || []).map(item => ({
-      ...item,
-      read: Boolean(item.is_read)
-    }));
+      notifications = (res.results || []).map(item => ({
+        ...item,
+        read: Boolean(item.is_read)
+      }));
+    } catch (e) {
+      notifications = [];
+    }
 
-    return successResponse(notifications, "取得通知成功", ctx.request);
+    return successResponse(notifications, "取得通知成功", 200, headers);
   } catch (err: any) {
     console.error("Get admin notifications error:", err);
-    return errorResponse(err.message || "讀取通知失敗", 500, ctx.request);
+    return errorResponse(err.message || "讀取通知失敗", 500, headers);
   }
 }
 
@@ -182,7 +191,7 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
 export async function handleMarkAdminNotificationRead(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
   const adminId = admin ? admin.id : 1;
-  const { request, env } = ctx;
+  const { request, env, headers } = ctx;
 
   try {
     const body = await request.json().catch(() => ({})) as { notification_id?: string; mark_all?: boolean };
@@ -201,9 +210,9 @@ export async function handleMarkAdminNotificationRead(ctx: HandlerContext): Prom
       `).bind(adminId, body.notification_id).run();
     }
 
-    return successResponse(null, "已更新已讀狀態", request);
+    return successResponse(null, "已更新已讀狀態", 200, headers);
   } catch (err: any) {
-    return errorResponse(err.message || "更新已讀狀態失敗", 500, request);
+    return errorResponse(err.message || "更新已讀狀態失敗", 500, headers);
   }
 }
 
@@ -214,7 +223,7 @@ export async function handleMarkAdminNotificationRead(ctx: HandlerContext): Prom
 export async function handleDeleteAdminNotification(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
   const adminId = admin ? admin.id : 1;
-  const { request, env } = ctx;
+  const { request, env, headers } = ctx;
 
   try {
     const url = new URL(request.url);
@@ -232,11 +241,11 @@ export async function handleDeleteAdminNotification(ctx: HandlerContext): Promis
         WHERE admin_id = ? AND notification_id = ?
       `).bind(adminId, notificationId).run();
     } else {
-      return errorResponse("缺少 notification_id 或 clear_all 參數", 400, request);
+      return errorResponse("缺少 notification_id 或 clear_all 參數", 400, headers);
     }
 
-    return successResponse(null, "通知已從資料庫物理刪除", request);
+    return successResponse(null, "通知已從資料庫物理刪除", 200, headers);
   } catch (err: any) {
-    return errorResponse(err.message || "刪除通知失敗", 500, request);
+    return errorResponse(err.message || "刪除通知失敗", 500, headers);
   }
 }

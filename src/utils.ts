@@ -11,7 +11,7 @@ export async function hashPassword(password: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** CORS 標頭 */
+/** CORS 標頭 (動態支援包含 .pages.dev 網域) */
 export function buildCorsHeaders(requestOrigin: string): Record<string, string> {
   const allowedOrigins = [
     "https://hervive-pages.pages.dev",
@@ -22,7 +22,8 @@ export function buildCorsHeaders(requestOrigin: string): Record<string, string> 
     "http://localhost:3001",
     "http://localhost:5173"
   ];
-  const validOrigin = allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0];
+  const isAllowed = allowedOrigins.includes(requestOrigin) || (!!requestOrigin && requestOrigin.endsWith('.pages.dev'));
+  const validOrigin = isAllowed ? requestOrigin : allowedOrigins[0];
   return {
     "Access-Control-Allow-Origin": validOrigin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
