@@ -96,7 +96,7 @@ export async function handleCreateInventoryTransaction(ctx: HandlerContext): Pro
   }
 }
 
-/** 更新庫存異動 (自動恢復舊數量並重算) */
+/** 更新庫存異動 (自動恢復舊數量、同步更新連動財務帳目) */
 export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
   try {
@@ -142,8 +142,58 @@ export async function handleUpdateInventoryTransaction(ctx: HandlerContext): Pro
       ).bind(netStockChange, oldTrans.product_id)
     );
 
+    // 3. 🌟 清理舊有連動財務紀錄 (Clean up old linked financial records)
+    if (product) {
+      if (oldTrans.type === 'purchase') {
+        statements.push(
+          env.reserve_db.prepare(
+            "DELETE FROM cash_transactions WHERE type = 'expense' AND date = ? AND description LIKE ?"
+          ).bind(oldTrans.date, `[進貨] ${product.name} x${oldTrans.quantity}%`)
+        );
+      } else if (oldTrans.type === 'sale') {
+        statements.push(
+          env.reserve_db.prepare(
+            "DELETE FROM cash_transactions WHERE type = 'income' AND date = ? AND description LIKE ?"
+          ).bind(oldTrans.date, `[銷售] ${product.name} x${oldTrans.quantity}%`)
+        );
+        statements.push(
+          env.reserve_db.prepare(
+            "DELETE FROM revenue_recognitions WHERE source_type = 'product_sale' AND date = ? AND description LIKE ?"
+          ).bind(oldTrans.date, `[銷貨營收] ${product.name} x${oldTrans.quantity}%`)
+        );
+      }
+    }
+
+    // 4. 🌟 寫入全新連動財務紀錄 (Synchronously update linked financial records with new date and amount)
+    if (product) {
+      if (type === 'purchase') {
+        statements.push(
+          env.reserve_db.prepare(
+            `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
+             VALUES ('expense', '產品進貨成本', ?, '現金', ?, ?, ?)`
+          ).bind(total_amount, user_id || null, `[進貨] ${product.name} x${quantity} (${description || ''})`, date)
+        );
+      } else if (type === 'sale') {
+        statements.push(
+          env.reserve_db.prepare(
+            `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
+             VALUES ('income', '產品銷售收入', ?, '現金', ?, ?, ?)`
+          ).bind(total_amount, user_id || null, `[銷售] ${product.name} x${quantity} (${description || ''})`, date)
+        );
+
+        if (user_id) {
+          statements.push(
+            env.reserve_db.prepare(
+              `INSERT INTO revenue_recognitions (source_type, amount, user_id, description, date)
+               VALUES ('product_sale', ?, ?, ?, ?)`
+            ).bind(total_amount, user_id, `[銷貨營收] ${product.name} x${quantity}`, date)
+          );
+        }
+      }
+    }
+
     await env.reserve_db.batch(statements);
-    return successResponse({}, "異動紀錄已更新，庫存已自動重算恢復", 200, headers);
+    return successResponse({}, "異動紀錄已更新，庫存與連動財務帳目已同步更新", 200, headers);
   } catch (error: unknown) {
     console.error("更新庫存紀錄失敗：", error);
     return errorResponse("更新庫存紀錄失敗", 500, headers);

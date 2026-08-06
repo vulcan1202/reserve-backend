@@ -74,7 +74,8 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
   const { request, env, headers } = ctx;
   try {
     const body = (await request.json()) as any;
-    const { id, course_id, amount } = body;
+    const { id, course_id, amount, purchase_date, date } = body;
+    const newDate = purchase_date || date;
 
     if (!id) return errorResponse("缺少會員課程紀錄 ID", 400, headers);
     if (typeof amount !== 'number' || amount <= 0) return errorResponse("購買總堂數必須大於 0", 400, headers);
@@ -102,8 +103,10 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
 
     batchStatements.push(
       env.reserve_db.prepare(
-        `UPDATE users_courses SET course_id = ?, amount = ?, remaining_count = ? WHERE id = ?`
-      ).bind(course_id, amount, newRemaining, id)
+        `UPDATE users_courses 
+         SET course_id = ?, amount = ?, remaining_count = ?, purchase_date = COALESCE(?, purchase_date) 
+         WHERE id = ?`
+      ).bind(course_id, amount, newRemaining, newDate || null, id)
     );
 
     const cashTrans = await env.reserve_db.prepare(`
@@ -120,10 +123,11 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
     if (cashTrans) {
       batchStatements.push(
         env.reserve_db.prepare(
-          `UPDATE cash_transactions SET amount = ?, description = ? WHERE id = ?`
+          `UPDATE cash_transactions SET amount = ?, description = ?, date = COALESCE(?, date) WHERE id = ?`
         ).bind(
           newTotalPrice,
           `購買「${newCourse.name}」共 ${amount} 堂`,
+          newDate || null,
           cashTrans.id
         )
       );
@@ -131,11 +135,12 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
       batchStatements.push(
         env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
-           VALUES ('income', '課程包套預收', ?, 'Cash', ?, ?, date('now', '+8 hours'))`
+           VALUES ('income', '課程包套預收', ?, 'Cash', ?, ?, COALESCE(?, date('now', '+8 hours')))`
         ).bind(
           newTotalPrice,
           oldPkg.user_id,
-          `購買「${newCourse.name}」共 ${amount} 堂`
+          `購買「${newCourse.name}」共 ${amount} 堂`,
+          newDate || null
         )
       );
     }

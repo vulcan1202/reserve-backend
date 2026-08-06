@@ -120,10 +120,28 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
   const { request, env, headers } = ctx;
   try {
     const body = (await request.json()) as AppointmentPatchBody;
-    const { id, status, notes, user_id, user_notes, beautician_id } = body;
+    const { id, status, notes, user_id, user_notes, beautician_id, date, start_time } = body as any;
     if (!id) return errorResponse("缺少預約 ID", 400, headers);
 
     const batchStatements: any[] = [];
+
+    // 🌟 若修改預約日期，同步更新關聯的財務帳目 (營收認列與現場加購紀錄)
+    if (date !== undefined) {
+      const oldAppt = await env.reserve_db.prepare("SELECT date, user_id FROM Appointments WHERE id = ?").bind(id).first() as { date: string; user_id: number } | null;
+      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET date = ? WHERE id = ?").bind(date, id));
+      if (oldAppt) {
+        batchStatements.push(
+          env.reserve_db.prepare("UPDATE revenue_recognitions SET date = ? WHERE appointment_id = ?").bind(date, id)
+        );
+        batchStatements.push(
+          env.reserve_db.prepare("UPDATE cash_transactions SET date = ? WHERE user_id = ? AND date = ? AND description LIKE ?").bind(date, oldAppt.user_id, oldAppt.date, `%現場購買%`)
+        );
+      }
+    }
+
+    if (start_time !== undefined) {
+      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET start_time = ? WHERE id = ?").bind(start_time, id));
+    }
 
     if (status !== undefined) {
       const appt = await env.reserve_db.prepare("SELECT status FROM Appointments WHERE id = ?").bind(id).first() as { status: string } | null;

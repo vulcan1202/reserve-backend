@@ -61,7 +61,7 @@ export async function handleCreateCashTransaction(ctx: HandlerContext): Promise<
   }
 }
 
-/** 編輯現金收支紀錄 */
+/** 編輯現金收支紀錄 (雙向同步連動資料表) */
 export async function handleUpdateCashTransaction(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
   try {
@@ -72,18 +72,44 @@ export async function handleUpdateCashTransaction(ctx: HandlerContext): Promise<
     if (type && !['income', 'expense'].includes(type)) return errorResponse("類型必須為 income 或 expense", 400, headers);
     if (amount !== undefined && (typeof amount !== 'number' || amount <= 0)) return errorResponse("金額必須大於 0", 400, headers);
 
-    await env.reserve_db.prepare(
-      `UPDATE cash_transactions 
-       SET type = COALESCE(?, type), 
-           category = COALESCE(?, category), 
-           amount = COALESCE(?, amount), 
-           payment_method = COALESCE(?, payment_method), 
-           description = COALESCE(?, description), 
-           date = COALESCE(?, date) 
-       WHERE id = ?`
-    ).bind(type || null, category || null, amount || null, payment_method || null, description || null, date || null, id).run();
+    const oldCt = await env.reserve_db.prepare("SELECT * FROM cash_transactions WHERE id = ?").bind(id).first() as any;
+    if (!oldCt) return errorResponse("找不到該筆收支紀錄", 404, headers);
 
-    return successResponse({}, "收支紀錄更新成功", 200, headers);
+    const batchStatements: any[] = [];
+
+    // 1. 更新本表紀錄
+    batchStatements.push(
+      env.reserve_db.prepare(
+        `UPDATE cash_transactions 
+         SET type = COALESCE(?, type), 
+             category = COALESCE(?, category), 
+             amount = COALESCE(?, amount), 
+             payment_method = COALESCE(?, payment_method), 
+             description = COALESCE(?, description), 
+             date = COALESCE(?, date) 
+         WHERE id = ?`
+      ).bind(type || null, category || null, amount || null, payment_method || null, description || null, date || null, id)
+    );
+
+    // 2. 🌟 雙向同步關聯資料表 (例如：包套購買日期、進銷存異動日期)
+    const newDate = date || oldCt.date;
+    if (oldCt.category === '課程包套預收' && oldCt.user_id) {
+      batchStatements.push(
+        env.reserve_db.prepare(
+          "UPDATE users_courses SET purchase_date = ? WHERE user_id = ? AND purchase_date = ?"
+        ).bind(newDate, oldCt.user_id, oldCt.date)
+      );
+    } else if ((oldCt.category === '產品進貨成本' || oldCt.category === '產品銷售收入')) {
+      batchStatements.push(
+        env.reserve_db.prepare(
+          "UPDATE inventory_transactions SET date = ? WHERE date = ?"
+        ).bind(newDate, oldCt.date)
+      );
+    }
+
+    await env.reserve_db.batch(batchStatements);
+
+    return successResponse({}, "收支紀錄更新成功，關聯資料表已同步更新", 200, headers);
   } catch (error: unknown) {
     console.error("更新現金收支失敗：", error);
     return errorResponse("更新現金收支紀錄失敗", 500, headers);
