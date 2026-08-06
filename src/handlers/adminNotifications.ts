@@ -39,7 +39,6 @@ const getTaiwanDateTimeDetails = (dateObj: Date = new Date()) => {
 const formatTaiwanTimeStr = (timeStr?: string): string => {
   if (!timeStr) return getTaiwanDateTimeDetails().fullStr;
   
-  // 若為 ISO 格式或含 Z
   if (timeStr.includes('T') || timeStr.endsWith('Z')) {
     const dt = new Date(timeStr);
     if (!isNaN(dt.getTime())) {
@@ -51,6 +50,7 @@ const formatTaiwanTimeStr = (timeStr?: string): string => {
 
 /**
  * 🌟 廣播即時派發通知給資料庫中的所有 Admin 帳號 (Instant Dispatch to All Admins)
+ * 當預約被點擊為「已確認」或「已取消」時發動寫入
  */
 export async function dispatchNotificationToAllAdmins(
   env: any,
@@ -84,7 +84,8 @@ export async function dispatchNotificationToAllAdmins(
 }
 
 /**
- * 1. 取得與自動動態派發個人化通知 (GET /api/admin/notifications)
+ * 1. 取得個人化通知 (GET /api/admin/notifications)
+ * 🌟 已移除自動重掃重寫迴圈，確保使用者刪除通知後絕不復活！
  */
 export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
@@ -102,40 +103,7 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
         WHERE admin_id = ? AND (notification_id LIKE 'appt-pending%' OR badge_text = '待服務' OR title LIKE '%待處理%' OR title LIKE '%待確認%')
       `).bind(adminId).run();
 
-      // 🌟 2. 最新預約 (100% 排除 pending！只處理已確認 confirmed 或已取消 cancelled/cancel)
-      const appts = await env.reserve_db.prepare(`
-        SELECT 
-          Appointments.id, Appointments.date, Appointments.start_time, Appointments.appointment_code, Appointments.status, Appointments.created_at,
-          Users.last_name || Users.first_name AS client_name
-        FROM Appointments 
-        JOIN Users ON Appointments.user_id = Users.id
-        WHERE Appointments.status IN ('confirmed', 'cancelled', 'cancel') 
-        ORDER BY Appointments.id DESC LIMIT 5
-      `).all<any>();
-
-      if (appts.results) {
-        for (const a of appts.results) {
-          const isCancelled = (a.status === 'cancelled' || a.status === 'cancel');
-          const notifId = `appt-${isCancelled ? 'cancelled' : 'confirmed'}-${a.id}`;
-          const title = isCancelled 
-            ? `【預約取消】${a.client_name || '客戶'} 的預約已取消`
-            : `【預約確認】${a.client_name || '客戶'} 的預約已確認`;
-          const message = `預約時間：${a.date} ${a.start_time} | 預約單號：${a.appointment_code}`;
-          const badgeText = isCancelled ? '預約已取消' : '預約已確認';
-          const badgeClass = isCancelled ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200';
-          const icon = isCancelled ? 'mdi:calendar-remove' : 'mdi:calendar-check';
-          const iconBg = isCancelled ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-600 border border-emerald-200';
-          const link = '/Appointment';
-
-          await env.reserve_db.prepare(`
-            INSERT OR IGNORE INTO admin_notifications 
-            (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
-            VALUES (?, ?, 'appointment', ?, ?, ?, ?, ?, ?, ?, 0, ?)
-          `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
-        }
-      }
-
-      // 3. 週財報推播 (禮拜日 22:00 以後)
+      // 2. 週財報定時推播 (禮拜日 22:00 以後)
       if (taiwanTime.dayOfWeek === 0 && taiwanTime.hour >= 22) {
         const notifId = `fin-weekly-${taiwanTime.dateStr}`;
         const title = `【週財報推播】本週門市營收實質履約統計`;
@@ -153,7 +121,7 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
         `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
       }
 
-      // 4. 月財報推播 (月底 22:00 以後)
+      // 3. 月財報定時推播 (月底 22:00 以後)
       if (taiwanTime.isLastDayOfMonth && taiwanTime.hour >= 22) {
         const notifId = `fin-monthly-${taiwanTime.year}-${taiwanTime.month}`;
         const title = `【月財報推播】${taiwanTime.year}-${taiwanTime.month} 月份門市營運綜合結算`;
@@ -244,6 +212,7 @@ export async function handleMarkAdminNotificationRead(ctx: HandlerContext): Prom
 
 /**
  * 3. 實體物理刪除通知 (DELETE /api/admin/notifications)
+ * 從 D1 資料庫徹底物理刪除，防止 DB 肥大
  */
 export async function handleDeleteAdminNotification(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
@@ -278,13 +247,18 @@ export async function handleDeleteAdminNotification(ctx: HandlerContext): Promis
 /**
  * 4. 探針快取檢查 (GET /api/admin/notifications/check-probe)
  * 使用 Cloudflare caches.default API 提供 15 秒邊緣層防護快取 (0 D1 讀取開銷)
+ * 精準監聽 admin_notifications 資料庫變動狀態
  */
 export async function handleNotificationProbe(ctx: HandlerContext): Promise<Response> {
+  const admin = await authenticateAdmin(ctx);
+  const adminId = admin ? admin.id : 1;
   const { request, env, headers } = ctx;
 
   try {
     const cache = caches.default;
     const cacheUrl = new URL(request.url);
+    // 依據 admin_id 進行獨立 ETag 快取隔離
+    cacheUrl.searchParams.set('admin_id', String(adminId));
     const cacheKey = new Request(cacheUrl.toString(), { method: 'GET', headers: request.headers });
 
     // 1. 嘗試從 Cloudflare 邊緣層快取讀取
@@ -293,18 +267,28 @@ export async function handleNotificationProbe(ctx: HandlerContext): Promise<Resp
       return cachedResponse;
     }
 
-    // 2. 邊緣快取未命中 (Cache Miss)：從 D1 資料庫極速讀取已確認/已取消預約的 MAX(id)
-    let maxApptId = 0;
+    // 2. 邊緣快取未命中 (Cache Miss)：從 D1 資料庫讀取該管理員通知的極速特徵 (MAX ID、總數、已讀數)
+    let maxNotifId = 0;
+    let totalCount = 0;
+    let readCount = 0;
+
     try {
       const row = await env.reserve_db.prepare(`
-        SELECT MAX(id) AS max_id FROM Appointments WHERE status IN ('confirmed', 'cancelled', 'cancel')
-      `).first<{ max_id: number }>();
-      maxApptId = row?.max_id || 0;
+        SELECT MAX(id) AS max_id, COUNT(*) AS total, SUM(is_read) AS total_read 
+        FROM admin_notifications 
+        WHERE admin_id = ?
+      `).bind(adminId).first<{ max_id: number; total: number; total_read: number }>();
+
+      maxNotifId = row?.max_id || 0;
+      totalCount = row?.total || 0;
+      readCount = row?.total_read || 0;
     } catch (e) {
-      maxApptId = 0;
+      maxNotifId = 0;
+      totalCount = 0;
+      readCount = 0;
     }
 
-    const currentETag = `W/"appt-${maxApptId}"`;
+    const currentETag = `W/"notif-${adminId}-${maxNotifId}-${totalCount}-${readCount}"`;
     const clientETag = request.headers.get("If-None-Match");
 
     let response: Response;
