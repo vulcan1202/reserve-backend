@@ -1,26 +1,10 @@
 // ========================================================
 // 管理員個人化通知與物理刪除處理器 (handlers/adminNotifications.ts)
-// 支援多管理員獨立通知、跨裝置同步與資料庫實體刪除防肥大
+// 支援多管理員獨立通知、即時派發、跨裝置同步與資料庫實體刪除防肥大
 // ========================================================
 import type { HandlerContext } from "../types";
-import { successResponse, errorResponse, buildCorsHeaders } from "../utils";
+import { successResponse, errorResponse } from "../utils";
 import { authenticateAdmin } from "./adminAuth";
-
-interface NotificationDBRecord {
-  id: number;
-  admin_id: number;
-  notification_id: string;
-  type: string;
-  title: string;
-  message: string;
-  link: string;
-  badge_text: string;
-  badge_class: string;
-  icon: string;
-  icon_bg: string;
-  is_read: number;
-  created_at: string;
-}
 
 const getTaiwanDateTimeDetails = (dateObj: Date = new Date()) => {
   const formatter = new Intl.DateTimeFormat('zh-TW', {
@@ -49,35 +33,72 @@ const getTaiwanDateTimeDetails = (dateObj: Date = new Date()) => {
 }
 
 /**
+ * 🌟 廣播即時派發通知給資料庫中的所有 Admin 帳號 (Instant Dispatch to All Admins)
+ */
+export async function dispatchNotificationToAllAdmins(
+  env: any,
+  notifId: string,
+  type: string,
+  title: string,
+  message: string,
+  link: string,
+  badgeText: string,
+  badgeClass: string,
+  icon: string,
+  iconBg: string
+) {
+  try {
+    const admins = await env.reserve_db.prepare(`SELECT id FROM AdminUsers`).all();
+    const adminIds = (admins.results || []).map((a: any) => a.id);
+    if (adminIds.length === 0) adminIds.push(1);
+
+    for (const adminId of adminIds) {
+      await env.reserve_db.prepare(`
+        INSERT OR IGNORE INTO admin_notifications 
+        (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `).bind(adminId, notifId, type, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+    }
+  } catch (e) {
+    console.error("dispatchNotificationToAllAdmins error:", e);
+  }
+}
+
+/**
  * 1. 取得與自動動態派發個人化通知 (GET /api/admin/notifications)
  */
 export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
-  const adminId = admin ? admin.id : 1; // 預設或驗證身份
+  const adminId = admin ? admin.id : 1;
 
   const { env } = ctx;
 
   try {
     const taiwanTime = getTaiwanDateTimeDetails();
 
-    // 🌟 自動為該管理員嘗試補發最新的系統通知 (使用 INSERT OR IGNORE 確保獨特且不重複)
-    // 1. 最新預約
+    // 🌟 1. 最新預約 (過濾掉 pending，只通知 confirmed 與 cancelled/cancel)
     const appts = await env.reserve_db.prepare(`
-      SELECT id, client_name, date, start_time, appointment_code, status, created_at 
-      FROM appointments 
-      WHERE status IN ('confirmed', 'pending') 
-      ORDER BY id DESC LIMIT 5
+      SELECT 
+        Appointments.id, Appointments.date, Appointments.start_time, Appointments.appointment_code, Appointments.status, Appointments.created_at,
+        Users.last_name || Users.first_name AS client_name
+      FROM Appointments 
+      JOIN Users ON Appointments.user_id = Users.id
+      WHERE Appointments.status IN ('confirmed', 'cancelled', 'cancel') 
+      ORDER BY Appointments.id DESC LIMIT 5
     `).all<any>();
 
     if (appts.results) {
       for (const a of appts.results) {
-        const notifId = `appt-${a.id}`;
-        const title = `【預約通知】新增預約 - ${a.client_name}`;
+        const isCancelled = (a.status === 'cancelled' || a.status === 'cancel');
+        const notifId = `appt-${isCancelled ? 'cancelled' : 'confirmed'}-${a.id}`;
+        const title = isCancelled 
+          ? `【預約取消】${a.client_name || '客戶'} 的預約已取消`
+          : `【預約確認】${a.client_name || '客戶'} 的預約已確認`;
         const message = `預約時間：${a.date} ${a.start_time} | 預約單號：${a.appointment_code}`;
-        const badgeText = a.status === 'confirmed' ? '預約已確認' : '待服務';
-        const badgeClass = 'bg-emerald-100 text-emerald-800 border-emerald-200';
-        const icon = 'mdi:calendar-check';
-        const iconBg = 'bg-emerald-50 text-emerald-600 border border-emerald-200';
+        const badgeText = isCancelled ? '預約已取消' : '預約已確認';
+        const badgeClass = isCancelled ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200';
+        const icon = isCancelled ? 'mdi:calendar-remove' : 'mdi:calendar-check';
+        const iconBg = isCancelled ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-600 border border-emerald-200';
         const link = '/Appointment';
 
         await env.reserve_db.prepare(`
@@ -201,13 +222,11 @@ export async function handleDeleteAdminNotification(ctx: HandlerContext): Promis
     const clearAll = url.searchParams.get("clear_all") === "true";
 
     if (clearAll) {
-      // 🌟 全部清空：一鍵物理刪除該 Admin 的全部通知紀錄
       await env.reserve_db.prepare(`
         DELETE FROM admin_notifications 
         WHERE admin_id = ?
       `).bind(adminId).run();
     } else if (notificationId) {
-      // 🌟 單筆刪除：物理刪除特定通知
       await env.reserve_db.prepare(`
         DELETE FROM admin_notifications 
         WHERE admin_id = ? AND notification_id = ?

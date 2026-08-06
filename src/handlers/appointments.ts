@@ -10,6 +10,7 @@ import type {
 import { AppointmentStatus, HolidayType } from "../types";
 import { successResponse, errorResponse, calculateEndTime, calculateAge } from "../utils";
 import { MAX_RETRY } from "../constants";
+import { dispatchNotificationToAllAdmins } from "./adminNotifications";
 
 export async function handleCreateAppointment(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
@@ -55,6 +56,27 @@ export async function handleCreateAppointment(ctx: HandlerContext): Promise<Resp
         if ((err as { message?: string })?.message?.includes('UNIQUE') && attempt < MAX_RETRY - 1) continue;
         throw err;
       }
+    }
+
+    // 🌟 即時性派發：若預約狀態成立為 confirmed 則派發即時通知給所有 Admin (pending 則略過)
+    if (insertResult && insertResult.id) {
+      const client = await env.reserve_db.prepare(`SELECT last_name || first_name AS name FROM Users WHERE id = ?`).bind(user_id).first<{ name: string }>();
+      const clientName = client?.name || '客戶';
+      const notifId = `appt-confirmed-${insertResult.id}`;
+      const title = `【預約確認】${clientName} 的新預約成立`;
+      const message = `預約時間：${date} ${start_time} | 預約單號：${appointment_code}`;
+      await dispatchNotificationToAllAdmins(
+        env,
+        notifId,
+        'appointment',
+        title,
+        message,
+        '/Appointment',
+        '預約已確認',
+        'bg-emerald-100 text-emerald-800 border-emerald-200',
+        'mdi:calendar-check',
+        'bg-emerald-50 text-emerald-600 border border-emerald-200'
+      );
     }
 
     return successResponse({
@@ -138,18 +160,15 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
         if (usedCourses.results && usedCourses.results.length > 0) {
           for (const uc of usedCourses.results as { user_course_id: number, use_count: number }[]) {
             
-            // 檢查是否為當初「現場新購買」建立的包套
             const checkNewBuy = await env.reserve_db.prepare(
               "SELECT id FROM cash_transactions WHERE user_id = (SELECT user_id FROM users_courses WHERE id = ?) AND description LIKE ?"
             ).bind(uc.user_course_id, `%現場購買%`).first();
 
             if (checkNewBuy) {
-              // 若是現場新買的合約，直接整筆刪除
               batchStatements.push(
                 env.reserve_db.prepare("DELETE FROM users_courses WHERE id = ?").bind(uc.user_course_id)
               );
             } else {
-              // 若是既有包套，將堂數加回來
               batchStatements.push(
                 env.reserve_db.prepare("UPDATE users_courses SET remaining_count = remaining_count + ? WHERE id = ?").bind(uc.use_count, uc.user_course_id)
               );
@@ -157,17 +176,14 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
           }
         }
 
-        // 2. 刪除該預約的堂數流水帳紀錄
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM appointment_courses WHERE appointment_id = ?").bind(id)
         );
 
-        // 3. 刪除實質營收認列
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM revenue_recognitions WHERE appointment_id = ?").bind(id)
         );
 
-        // 4. 刪除現場加購產生的現金收入流
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM cash_transactions WHERE description LIKE ? AND user_id IN (SELECT user_id FROM Appointments WHERE id = ?)").bind(`%現場購買%`, id)
         );
@@ -176,6 +192,50 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       batchStatements.push(
         env.reserve_db.prepare("UPDATE Appointments SET status = ? WHERE id = ?").bind(status, id)
       );
+
+      // 🌟 即時性廣播通知派發給所有 Admin 帳號 (Instant Notification Dispatch)
+      const apptDetail = await env.reserve_db.prepare(`
+        SELECT A.id, A.date, A.start_time, A.appointment_code, U.last_name || U.first_name AS client_name 
+        FROM Appointments A 
+        JOIN Users U ON A.user_id = U.id 
+        WHERE A.id = ?
+      `).bind(id).first<{ id: number; date: string; start_time: string; appointment_code: string; client_name: string }>();
+
+      if (apptDetail) {
+        if (status === AppointmentStatus.CONFIRMED || status === 'confirmed') {
+          const notifId = `appt-confirmed-${id}`;
+          const title = `【預約確認】${apptDetail.client_name || '客戶'} 的預約已確認`;
+          const message = `預約時間：${apptDetail.date} ${apptDetail.start_time} | 預約單號：${apptDetail.appointment_code}`;
+          await dispatchNotificationToAllAdmins(
+            env,
+            notifId,
+            'appointment',
+            title,
+            message,
+            '/Appointment',
+            '預約已確認',
+            'bg-emerald-100 text-emerald-800 border-emerald-200',
+            'mdi:calendar-check',
+            'bg-emerald-50 text-emerald-600 border border-emerald-200'
+          );
+        } else if (status === AppointmentStatus.CANCELLED || status === 'cancelled' || status === 'cancel') {
+          const notifId = `appt-cancelled-${id}`;
+          const title = `【預約取消】${apptDetail.client_name || '客戶'} 的預約已取消`;
+          const message = `預約時間：${apptDetail.date} ${apptDetail.start_time} | 預約單號：${apptDetail.appointment_code}`;
+          await dispatchNotificationToAllAdmins(
+            env,
+            notifId,
+            'appointment',
+            title,
+            message,
+            '/Appointment',
+            '預約已取消',
+            'bg-rose-100 text-rose-800 border-rose-200',
+            'mdi:calendar-remove',
+            'bg-rose-50 text-rose-600 border border-rose-200'
+          );
+        }
+      }
     }
 
     if (notes !== undefined) {
@@ -223,7 +283,6 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
       ).bind(AppointmentStatus.COMPLETE, appointment_id)
     );
 
-    // 處理 【既有包套】 扣堂與流水帳紀錄
     if (courses_used && courses_used.length > 0) {
       for (const item of courses_used) {
         if (!item.user_course_id || !item.use_count || item.use_count <= 0) continue;
@@ -240,7 +299,6 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
 
         const newRemaining = courseInfo.remaining_count - item.use_count;
 
-        // 寫入升級版流水帳 (type = 'usage') 並記錄 balance_after 快照
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
            VALUES (?, ?, 'usage', ?, ?, ?)`
@@ -248,62 +306,48 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         
         batchStatements.push(env.reserve_db.prepare(`UPDATE users_courses SET remaining_count = ? WHERE id = ?`).bind(newRemaining, item.user_course_id));
         
-        const recognizedAmount = courseInfo.price * item.use_count;
-        batchStatements.push(
-          env.reserve_db.prepare(
-            `INSERT INTO revenue_recognitions (source_type, amount, user_id, appointment_id, user_course_id, description, date)
-             VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
-          ).bind(recognizedAmount, appt.user_id, appointment_id, item.user_course_id, `到店履約扣堂：${courseInfo.course_name} (${item.use_count}堂)`, transactionDate)
-        );
-      }
-    }
-
-    // 處理 【現場當下購買即使用】
-    if (new_courses_bought && new_courses_bought.length > 0) {
-      for (const newCourse of new_courses_bought) {
-        const { course_id, buy_amount, use_count, payment_method } = newCourse;
-        if (!course_id || !buy_amount || buy_amount <= 0 || !use_count || use_count <= 0) continue;
-
-        const course = await env.reserve_db.prepare("SELECT id, name, price FROM courses WHERE id = ?").bind(course_id).first() as { id: number; name: string; price: number } | null;
-        if (!course) return errorResponse(`找不到課程資料`, 400, headers);
-
-        const initialRemaining = buy_amount - use_count; 
-        const totalPurchaseAmount = course.price * buy_amount; 
-
-        const newUserCourse = await env.reserve_db.prepare(
-          `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
-        ).bind(appt.user_id, course_id, buy_amount, initialRemaining).first() as { id: number } | null;
-
-        if (!newUserCourse?.id) throw new Error("建立會員包套失敗");
-        const newUserCourseId = newUserCourse.id;
-
-        batchStatements.push(
-          env.reserve_db.prepare(
-            `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) VALUES ('income', '當下購買課程', ?, ?, ?, ?, ?)`
-          ).bind(totalPurchaseAmount, payment_method || 'Cash', appt.user_id, `現場購買「${course.name}」共 ${buy_amount} 堂 (當下使用 ${use_count} 堂)`, transactionDate)
-        );
-
-        // 寫入現場即時履約的流水帳
         batchStatements.push(env.reserve_db.prepare(
-          `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
-           VALUES (?, ?, 'usage', ?, ?, ?)`
-        ).bind(appointment_id, newUserCourseId, use_count, initialRemaining, `現場購買並即時履約：${course.name}`));
-
-        const recognizedAmount = course.price * use_count;
-        batchStatements.push(
-          env.reserve_db.prepare(
-            `INSERT INTO revenue_recognitions (source_type, amount, user_id, appointment_id, user_course_id, description, date) VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
-          ).bind(recognizedAmount, appt.user_id, appointment_id, newUserCourseId, `現場購買並即時履約：${course.name} (${use_count}堂)`, transactionDate)
-        );
+          `INSERT INTO revenue_recognitions (source_type, appointment_id, amount, course_name, client_name, date, description) 
+           VALUES ('course_usage', ?, ?, ?, (SELECT last_name || first_name FROM Users WHERE id = ?), ?, ?)`
+        ).bind(appointment_id, courseInfo.price * item.use_count, courseInfo.course_name, appt.user_id, transactionDate, `課程履約認列：${courseInfo.course_name} x ${item.use_count} 堂`));
       }
     }
 
-    await env.reserve_db.batch(batchStatements);
+    if (new_courses_bought && new_courses_bought.length > 0) {
+      for (const item of new_courses_bought) {
+        if (!item.course_id || !item.amount || item.amount <= 0) continue;
 
-    return successResponse({}, "預約已完成點收！", 200, headers);
+        const courseInfo = await env.reserve_db.prepare(`SELECT price, name FROM courses WHERE id = ?`).bind(item.course_id).first() as { price: number; name: string } | null;
+        if (!courseInfo) return errorResponse(`找不到課程資料`, 400, headers);
+
+        const totalPrice = courseInfo.price * item.amount;
+
+        const ucResult = await env.reserve_db.prepare(
+          `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
+        ).bind(appt.user_id, item.course_id, item.amount, item.amount).first() as { id: number } | null;
+
+        if (ucResult && ucResult.id) {
+          batchStatements.push(env.reserve_db.prepare(
+            `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
+             VALUES (?, ?, 'purchase', ?, ?, ?)`
+          ).bind(appointment_id, ucResult.id, item.amount, item.amount, `現場加購新合約：${courseInfo.name}`));
+        }
+
+        batchStatements.push(env.reserve_db.prepare(
+          `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
+           VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
+        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.amount} 堂`, transactionDate));
+      }
+    }
+
+    if (batchStatements.length > 0) {
+      await env.reserve_db.batch(batchStatements);
+    }
+
+    return successResponse({}, "結單履約成功！", 200, headers);
   } catch (error: unknown) {
     const err = error as { message?: string };
-    console.error("點收處理失敗：", error);
-    return errorResponse("點收處理失敗：" + (err.message || "未知錯誤"), 500, headers);
+    console.error("結單失敗：", error);
+    return errorResponse("結單失敗：" + (err.message || "未知錯誤"), 500, headers);
   }
 }
