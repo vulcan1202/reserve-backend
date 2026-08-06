@@ -14,13 +14,21 @@ export interface AdminUserRecord {
 
 /**
  * 身分驗證中間件 (Auth Middleware)
- * 驗證 Request Cookie 中的 Session ID 是否有效且未過期
+ * 驗證 Request Cookie 或 Authorization Header 中的 Session ID 是否有效且未過期
  */
 export async function authenticateAdmin(ctx: HandlerContext): Promise<AdminUserRecord | null> {
   const { request, env } = ctx;
   const cookieHeader = request.headers.get("Cookie");
   const cookies = parseCookies(cookieHeader);
-  const sessionId = cookies["admin_session"];
+  let sessionId = cookies["admin_session"];
+
+  // 🌟 雙重相容：若 Cookie 不存在或被隱私瀏覽器/跨域攔截，支援 Authorization: Bearer <token> 備援
+  if (!sessionId) {
+    const authHeader = request.headers.get("Authorization");
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      sessionId = authHeader.substring(7).trim();
+    }
+  }
 
   if (!sessionId) {
     return null;
@@ -118,10 +126,10 @@ export async function handleAdminLogin(ctx: HandlerContext): Promise<Response> {
       VALUES (?, ?, ?)
     `).bind(sessionToken, admin.id, expiresAtISO).run();
 
-    // 設定安全 HttpOnly + Secure + SameSite=Lax Cookie Header
+    // 設定安全 HttpOnly + Secure + SameSite=None Cookie Header (相容跨域環境)
     const responseHeaders = {
       ...headers,
-      "Set-Cookie": `admin_session=${sessionToken}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}`
+      "Set-Cookie": `admin_session=${sessionToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${maxAgeSeconds}`
     };
 
     return successResponse({
@@ -129,7 +137,8 @@ export async function handleAdminLogin(ctx: HandlerContext): Promise<Response> {
         id: admin.id,
         username: admin.username,
         role: admin.role
-      }
+      },
+      token: sessionToken
     }, "登入成功！", 200, responseHeaders);
 
   } catch (error: unknown) {
@@ -146,7 +155,14 @@ export async function handleAdminLogout(ctx: HandlerContext): Promise<Response> 
   const { request, env, headers } = ctx;
   try {
     const cookies = parseCookies(request.headers.get("Cookie"));
-    const sessionId = cookies["admin_session"];
+    let sessionId = cookies["admin_session"];
+
+    if (!sessionId) {
+      const authHeader = request.headers.get("Authorization");
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        sessionId = authHeader.substring(7).trim();
+      }
+    }
 
     if (sessionId) {
       // 刪除 Session 紀錄
@@ -156,7 +172,7 @@ export async function handleAdminLogout(ctx: HandlerContext): Promise<Response> 
     // 將 Cookie 設定為過期 (Max-Age=0)
     const responseHeaders = {
       ...headers,
-      "Set-Cookie": "admin_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+      "Set-Cookie": "admin_session=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     };
 
     return successResponse({}, "已成功登出！", 200, responseHeaders);
@@ -181,7 +197,6 @@ export async function handleAdminMe(ctx: HandlerContext): Promise<Response> {
 }
 
 /**
- * 建立管理員帳號 API (POST /api/admin/register)
  * 供初始化或新增管理員使用
  */
 export async function handleAdminRegister(ctx: HandlerContext): Promise<Response> {
@@ -198,25 +213,27 @@ export async function handleAdminRegister(ctx: HandlerContext): Promise<Response
     const existing = await env.reserve_db.prepare(`
       SELECT id FROM AdminUsers WHERE username = ?
     `).bind(username.trim()).first();
+
     if (existing) {
-      return errorResponse("該管理員帳號已存在！", 409, headers);
+      return errorResponse("此管理員帳號已存在", 400, headers);
     }
 
-    // 使用 Argon2id 加鹽雜湊密碼
+    // 使用 Argon2id 加鹽雜湊加密密碼
     const passwordHash = await hashPassword(password);
 
-    // 插入資料庫
+    // 寫入 AdminUsers 表
     const result = await env.reserve_db.prepare(`
       INSERT INTO AdminUsers (username, password_hash, role)
-      VALUES (?, ?, ?) RETURNING id, username, role, created_at
-    `).bind(username.trim(), passwordHash, role).first<{
-      id: number;
-      username: string;
-      role: string;
-      created_at: string;
-    }>();
+      VALUES (?, ?, ?)
+    `).bind(username.trim(), passwordHash, role).run();
 
-    return successResponse({ admin: result }, "管理員帳號建立成功！", 201, headers);
+    return successResponse({
+      admin: {
+        id: result.meta.last_row_id,
+        username: username.trim(),
+        role
+      }
+    }, "管理員帳號建立成功！", 201, headers);
 
   } catch (error: unknown) {
     const err = error as { message?: string };
