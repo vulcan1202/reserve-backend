@@ -1,6 +1,7 @@
 // ========================================================
 // 管理員個人化通知與物理刪除處理器 (handlers/adminNotifications.ts)
 // 支援多管理員獨立通知、即時派發、跨裝置同步與資料庫實體刪除防肥大
+// 並且包含 Cloudflare caches.default 15 秒邊緣防護探針
 // ========================================================
 import type { HandlerContext } from "../types";
 import { successResponse, errorResponse } from "../utils";
@@ -247,5 +248,66 @@ export async function handleDeleteAdminNotification(ctx: HandlerContext): Promis
     return successResponse(null, "通知已從資料庫物理刪除", 200, headers);
   } catch (err: any) {
     return errorResponse(err.message || "刪除通知失敗", 500, headers);
+  }
+}
+
+/**
+ * 4. 探針快取檢查 (GET /api/admin/notifications/check-probe)
+ * 使用 Cloudflare caches.default API 提供 15 秒邊緣層防護快取 (0 D1 讀取開銷)
+ */
+export async function handleNotificationProbe(ctx: HandlerContext): Promise<Response> {
+  const { request, env, headers } = ctx;
+
+  try {
+    const cache = caches.default;
+    const cacheUrl = new URL(request.url);
+    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET', headers: request.headers });
+
+    // 1. 嘗試從 Cloudflare 邊緣層快取讀取
+    let cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+
+    // 2. 邊緣快取未命中 (Cache Miss)：從 D1 資料庫極速讀取 MAX(id) 狀態 (只讀取 1 列)
+    let maxApptId = 0;
+    try {
+      const row = await env.reserve_db.prepare(`SELECT MAX(id) AS max_id FROM Appointments`).first<{ max_id: number }>();
+      maxApptId = row?.max_id || 0;
+    } catch (e) {
+      maxApptId = 0;
+    }
+
+    const currentETag = `W/"appt-${maxApptId}"`;
+    const clientETag = request.headers.get("If-None-Match");
+
+    let response: Response;
+    const responseHeaders = {
+      ...headers,
+      "ETag": currentETag,
+      "Cache-Control": "public, max-age=15, s-maxage=15",
+    };
+
+    if (clientETag === currentETag) {
+      response = new Response(null, {
+        status: 304,
+        headers: responseHeaders,
+      });
+    } else {
+      response = new Response(JSON.stringify({ success: true, has_new: true, etag: currentETag }), {
+        status: 200,
+        headers: {
+          ...responseHeaders,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+      });
+    }
+
+    // 3. 寫入 Cloudflare 邊緣快取 15 秒 (異步寫入，不阻塞回應)
+    ctx.ctx.waitUntil(cache.put(cacheKey, response.clone()));
+
+    return response;
+  } catch (err: any) {
+    return errorResponse(err.message || "探針檢查失敗", 500, headers);
   }
 }

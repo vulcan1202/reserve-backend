@@ -72,6 +72,7 @@ import {
   handleGetAdminNotifications,
   handleMarkAdminNotificationRead,
   handleDeleteAdminNotification,
+  handleNotificationProbe,
 } from "./handlers/adminNotifications";
 
 export type RouteHandler = (ctx: HandlerContext) => Promise<Response>;
@@ -87,6 +88,7 @@ export const routeHandlers: Record<string, RouteHandler> = {
 
   // --- 🔔 管理員個人化通知與物理刪除 (Admin Notifications) ---
   'GET:/api/admin/notifications': handleGetAdminNotifications,
+  'GET:/api/admin/notifications/check-probe': handleNotificationProbe,
   'POST:/api/admin/notifications/mark-read': handleMarkAdminNotificationRead,
   'DELETE:/api/admin/notifications': handleDeleteAdminNotification,
 
