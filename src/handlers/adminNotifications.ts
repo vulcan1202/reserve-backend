@@ -1,7 +1,7 @@
 // ========================================================
 // 管理員個人化通知與物理刪除處理器 (handlers/adminNotifications.ts)
 // 支援多管理員獨立通知、即時派發、跨裝置同步與資料庫實體刪除防肥大
-// 並且包含 Cloudflare caches.default 15 秒邊緣防護探針
+// 並且包含 Cloudflare caches.default 15 秒邊緣防護探針與台灣時間格式化
 // ========================================================
 import type { HandlerContext } from "../types";
 import { successResponse, errorResponse } from "../utils";
@@ -22,16 +22,32 @@ const getTaiwanDateTimeDetails = (dateObj: Date = new Date()) => {
   const month = parts.find(p => p.type === 'month')?.value || '';
   const day = parts.find(p => p.type === 'day')?.value || '';
   const hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+  const minute = parts.find(p => p.type === 'minute')?.value || '00';
   
   const dateStr = `${year}-${month}-${day}`;
+  const fullStr = `${year}-${month}-${day} ${String(hour).padStart(2, '0')}:${minute}`;
   const taiwanDate = new Date(`${dateStr}T00:00:00+08:00`);
   const dayOfWeek = taiwanDate.getDay();
 
   const lastDayNum = new Date(Number(year), Number(month), 0).getDate();
   const isLastDayOfMonth = (parseInt(day, 10) === lastDayNum);
 
-  return { year, month, day, hour, dayOfWeek, isLastDayOfMonth, dateStr };
-}
+  return { year, month, day, hour, minute, dayOfWeek, isLastDayOfMonth, dateStr, fullStr };
+};
+
+/** 統一台灣時間格式化工具 */
+const formatTaiwanTimeStr = (timeStr?: string): string => {
+  if (!timeStr) return getTaiwanDateTimeDetails().fullStr;
+  
+  // 若為 ISO 格式或含 Z
+  if (timeStr.includes('T') || timeStr.endsWith('Z')) {
+    const dt = new Date(timeStr);
+    if (!isNaN(dt.getTime())) {
+      return getTaiwanDateTimeDetails(dt).fullStr;
+    }
+  }
+  return timeStr.substring(0, 16);
+};
 
 /**
  * 🌟 廣播即時派發通知給資料庫中的所有 Admin 帳號 (Instant Dispatch to All Admins)
@@ -53,12 +69,14 @@ export async function dispatchNotificationToAllAdmins(
     const adminIds = (admins.results || []).map((a: any) => a.id);
     if (adminIds.length === 0) adminIds.push(1);
 
+    const nowTaiwan = getTaiwanDateTimeDetails().fullStr;
+
     for (const adminId of adminIds) {
       await env.reserve_db.prepare(`
         INSERT OR IGNORE INTO admin_notifications 
-        (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-      `).bind(adminId, notifId, type, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+        (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+      `).bind(adminId, notifId, type, title, message, link, badgeText, badgeClass, icon, iconBg, nowTaiwan).run();
     }
   } catch (e) {
     console.error("dispatchNotificationToAllAdmins error:", e);
@@ -77,8 +95,14 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
   try {
     const taiwanTime = getTaiwanDateTimeDetails();
 
-    // 🌟 1. 最新預約 (過濾掉 pending，只通知 confirmed 與 cancelled/cancel)
     try {
+      // 🧹 1. 清理舊版誤把 pending / 待確認 寫入通知的舊資料
+      await env.reserve_db.prepare(`
+        DELETE FROM admin_notifications 
+        WHERE admin_id = ? AND (notification_id LIKE 'appt-pending%' OR badge_text = '待服務' OR title LIKE '%待處理%' OR title LIKE '%待確認%')
+      `).bind(adminId).run();
+
+      // 🌟 2. 最新預約 (100% 排除 pending！只處理已確認 confirmed 或已取消 cancelled/cancel)
       const appts = await env.reserve_db.prepare(`
         SELECT 
           Appointments.id, Appointments.date, Appointments.start_time, Appointments.appointment_code, Appointments.status, Appointments.created_at,
@@ -105,13 +129,13 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
 
           await env.reserve_db.prepare(`
             INSERT OR IGNORE INTO admin_notifications 
-            (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-            VALUES (?, ?, 'appointment', ?, ?, ?, ?, ?, ?, ?, 0)
-          `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+            (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
+            VALUES (?, ?, 'appointment', ?, ?, ?, ?, ?, ?, ?, 0, ?)
+          `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
         }
       }
 
-      // 2. 週財報推播 (禮拜日 22:00 以後)
+      // 3. 週財報推播 (禮拜日 22:00 以後)
       if (taiwanTime.dayOfWeek === 0 && taiwanTime.hour >= 22) {
         const notifId = `fin-weekly-${taiwanTime.dateStr}`;
         const title = `【週財報推播】本週門市營收實質履約統計`;
@@ -124,12 +148,12 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
 
         await env.reserve_db.prepare(`
           INSERT OR IGNORE INTO admin_notifications 
-          (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-          VALUES (?, ?, 'financial_weekly', ?, ?, ?, ?, ?, ?, ?, 0)
-        `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+          (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
+          VALUES (?, ?, 'financial_weekly', ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
       }
 
-      // 3. 月財報推播 (月底 22:00 以後)
+      // 4. 月財報推播 (月底 22:00 以後)
       if (taiwanTime.isLastDayOfMonth && taiwanTime.hour >= 22) {
         const notifId = `fin-monthly-${taiwanTime.year}-${taiwanTime.month}`;
         const title = `【月財報推播】${taiwanTime.year}-${taiwanTime.month} 月份門市營運綜合結算`;
@@ -142,12 +166,12 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
 
         await env.reserve_db.prepare(`
           INSERT OR IGNORE INTO admin_notifications 
-          (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read)
-          VALUES (?, ?, 'financial_monthly', ?, ?, ?, ?, ?, ?, ?, 0)
-        `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg).run();
+          (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
+          VALUES (?, ?, 'financial_monthly', ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
       }
     } catch (dbErr) {
-      console.warn("admin_notifications table might not exist yet:", dbErr);
+      console.warn("admin_notifications table error:", dbErr);
     }
 
     // 從 D1 撈取該管理員未被物理刪除的所有通知列表
@@ -173,7 +197,8 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
 
       notifications = (res.results || []).map(item => ({
         ...item,
-        read: Boolean(item.is_read)
+        read: Boolean(item.is_read),
+        time: formatTaiwanTimeStr(item.time)
       }));
     } catch (e) {
       notifications = [];
@@ -219,7 +244,6 @@ export async function handleMarkAdminNotificationRead(ctx: HandlerContext): Prom
 
 /**
  * 3. 實體物理刪除通知 (DELETE /api/admin/notifications)
- * 支援刪除單筆或全部清空，從 D1 資料庫徹底物理刪除，防止 DB 肥大
  */
 export async function handleDeleteAdminNotification(ctx: HandlerContext): Promise<Response> {
   const admin = await authenticateAdmin(ctx);
@@ -269,10 +293,12 @@ export async function handleNotificationProbe(ctx: HandlerContext): Promise<Resp
       return cachedResponse;
     }
 
-    // 2. 邊緣快取未命中 (Cache Miss)：從 D1 資料庫極速讀取 MAX(id) 狀態 (只讀取 1 列)
+    // 2. 邊緣快取未命中 (Cache Miss)：從 D1 資料庫極速讀取已確認/已取消預約的 MAX(id)
     let maxApptId = 0;
     try {
-      const row = await env.reserve_db.prepare(`SELECT MAX(id) AS max_id FROM Appointments`).first<{ max_id: number }>();
+      const row = await env.reserve_db.prepare(`
+        SELECT MAX(id) AS max_id FROM Appointments WHERE status IN ('confirmed', 'cancelled', 'cancel')
+      `).first<{ max_id: number }>();
       maxApptId = row?.max_id || 0;
     } catch (e) {
       maxApptId = 0;
@@ -303,7 +329,6 @@ export async function handleNotificationProbe(ctx: HandlerContext): Promise<Resp
       });
     }
 
-    // 3. 寫入 Cloudflare 邊緣快取 15 秒 (異步寫入，不阻塞回應)
     ctx.ctx.waitUntil(cache.put(cacheKey, response.clone()));
 
     return response;

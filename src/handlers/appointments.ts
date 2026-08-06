@@ -58,27 +58,6 @@ export async function handleCreateAppointment(ctx: HandlerContext): Promise<Resp
       }
     }
 
-    // 🌟 即時性派發：若預約狀態成立為 confirmed 則派發即時通知給所有 Admin (pending 則略過)
-    if (insertResult && insertResult.id) {
-      const client = await env.reserve_db.prepare(`SELECT last_name || first_name AS name FROM Users WHERE id = ?`).bind(user_id).first<{ name: string }>();
-      const clientName = client?.name || '客戶';
-      const notifId = `appt-confirmed-${insertResult.id}`;
-      const title = `【預約確認】${clientName} 的新預約成立`;
-      const message = `預約時間：${date} ${start_time} | 預約單號：${appointment_code}`;
-      await dispatchNotificationToAllAdmins(
-        env,
-        notifId,
-        'appointment',
-        title,
-        message,
-        '/Appointment',
-        '預約已確認',
-        'bg-emerald-100 text-emerald-800 border-emerald-200',
-        'mdi:calendar-check',
-        'bg-emerald-50 text-emerald-600 border border-emerald-200'
-      );
-    }
-
     return successResponse({
       appointment: { id: insertResult?.id, date, start_time, end_time, appointment_code }
     }, "預約成功！", 201, headers);
