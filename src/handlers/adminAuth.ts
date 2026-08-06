@@ -194,10 +194,6 @@ export async function handleAdminRegister(ctx: HandlerContext): Promise<Response
       return errorResponse("請輸入欲建立的管理員帳號與密碼", 400, headers);
     }
 
-    if (password.length < 6) {
-      return errorResponse("密碼長度不得少於 6 個字元", 400, headers);
-    }
-
     // 檢查帳號是否已存在
     const existing = await env.reserve_db.prepare(`
       SELECT id FROM AdminUsers WHERE username = ?
