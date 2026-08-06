@@ -17,6 +17,8 @@
     "wrangler": "^4.114.0"
   },
   "dependencies": {
+    "@noble/hashes": "^2.2.0",
+    "argon2-browser": "^1.18.0",
     "hash-wasm": "^4.12.0"
   }
 }
