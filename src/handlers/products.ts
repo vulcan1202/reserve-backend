@@ -36,8 +36,8 @@ export async function handleCreateProduct(ctx: HandlerContext): Promise<Response
 
     const result = await env.reserve_db.prepare(
       `INSERT INTO products (name, cost_price, selling_price, stock_quantity)
-       VALUES (?, ?, ?, ?) RETURNING *`
-    ).bind(name.trim(), cost_price, selling_price, stock_quantity).first();
+       VALUES (?, ?, ?, 0) RETURNING *`
+    ).bind(name.trim(), cost_price, selling_price).first();
 
     return successResponse(result, "產品建立成功", 201, headers);
   } catch (error: unknown) {
