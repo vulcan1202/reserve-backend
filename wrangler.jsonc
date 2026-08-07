@@ -16,14 +16,19 @@
 	],
 	"d1_databases": [
 		{
-		"binding": "reserve_db",
-		"database_name": "reserve-db",
-		"database_id": "d2de5aa1-2ad8-47bf-a737-911e8b32ebe4"
+			"binding": "reserve_db",
+			"database_name": "reserve-db",
+			"database_id": "d2de5aa1-2ad8-47bf-a737-911e8b32ebe4"
 		}
 	],
 	"triggers": {
 		"crons": [
 			"*/15 * * * *"
 		]
+	},
+	"vars": {
+		"CALENDAR_CONFIG": "[\"jmes7062121@gmail.com\",\"lynn29731999@gmail.com\"]",
+		"GOOGLE_SERVICE_ACCOUNT_EMAIL": "calendar-bot@studio-booking-504813.iam.gserviceaccount.com",
+		"GOOGLE_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCf/naITVieJOeS\\n3903H2JHvHrr1T2yOzF98V+6PFe6rZdHS7P7o+253H4pBVoxkkAuvhbUVWq41DNg\\nhfpuUZAhFrBFdoiV7vMCvSxTxcqSeFnpUh7dX7PoA1ZnwfvbxhBmercoV0JnUc2w\\nEMbbr7f6zxSoKHMx91K8Z2jlUGJBZzcXpeIHV1MNr9oYQFJwcxz7rMUdDJVhR2Xo\\n1/Vl9Yb+alcwQNn4r6rT31tbrB+NAyjTC7Dwtmv4BOaXv2OY/pnoqMAhLnqKd5tB\\nEOimp+rUe2xE2DMI3s6z410LLLoXfl8/78DADFyerRFGk53zGfZi7UkGa/59ptC+\\nZ3DdCdubAgMBAAECggEAFqFXDGt9o+IjcTZso1iIkw4ECFSMBVLzFVXYDPnDt5od\\n1432ghr19qqgm6vFTgAE8mJHzLaHlxIeHEKHIXs0RZc1zUrOrKp07AfBpoMdET+o\\nXroTYeD2C6oL2uGTfsq9VMl5xmElTtjsHOxv5vCsDMlP/4MNMYhCnHc3XUF+obJp\\nofNUu77yv+ivXpP5JXY+Sy67gJoEvO4Vmgi5Zb7wOqt7UHBbD1vARmhQ5KmQbB7P\\nqffEVetPrGEoaldmwjXRniBmu9+6Qf3L+TpjtHSxoOOMz1du7EuoGxgZwylF0+oc\\n31gjbEimmeSIxjT4Uy9n+ZkY/dktxV7Xac6/po25/QKBgQDRxdcPT5ZWvUw1K3uZ\\npN/KapxkFkrxHrIWRPBd7k/Tl7iMBohpza/UQS35S4w49gDHnfYXFdI5uCMfWKe1\\nsJmebCqTEAJnqQlcMUm2jShTRmC/kh7z/PWACDIBH5cmG3W8etShI9WPLSs0VMbD\\nyRd8tVV5uu5oNlwRvbXo2l3cxQKBgQDDQGRiWn4d9/e9MUaCKGga22p9s5M2reyU\\nB3ZTG7ZFd1rviAyLS5QFEyOfwj4ly1TZMqIN9pwSxnrjvyVYwjCGaZRluCDokO1a\\nITLcPoobYUcan7UjTwWSJQLFkaoDuYjxdH0UtV20Fxw5q1pivK3NrGdLWqgRKnBa\\nFVwkcK0c3wKBgHN+3OimJhz9vl6r4TJ3z2tQBWkpyPs2rlCKhlkBI9xY9ZfK5QJz\\n5/ISLPDMApk+ALHnK54MOqHi2xugIT5szDeoUEyGDPzr2aZz0KT81Q38erofBoHJ\\nbZWfbYCm1v55MfqjGjzaUPOyp835OzKCnjbgU/5gyHCCNXDjJavdxr4NAoGBAJcK\\n1x0mt+1jB+j5l3vU2kP8fPLk2fswrJUO+L/t7iDq5hPqgRm4y7bpSWOrFfySwP6M\\npsR6g94aYLKSCcgR4Qv53OybdgmzI4nXqMqsLpZjuGemKLA5zytxKiXAO29KNd/j\\np2c/rk9EmXcbUX6USzeSKQ4oAV/WHrfxUih2adStAoGBAMi10xWEk4yu+zpycV2A\\n1zlQwv7x+Zpbfcv08IULnSVpEi4tmVZmJWspTrQHu2Jemrk44nd5WyzaWvdt+dRK\\nuyhIkGDSR6cCePksaKpiq+0Bk8N1MlLYNZZaSpkIEV2DHwLNfGE/yrizBpMT2ge5\\nDUBglNWN1IZ9R7MEMh1iO2Gv\\n-----END PRIVATE KEY-----\\n"
 	}
 }

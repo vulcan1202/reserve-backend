@@ -15,6 +15,13 @@ export interface Env {
   LINE_LOGIN_CHANNEL_SECRET: string;
 
   ENABLE_SIGNATURE_VERIFY?: string;
+
+  // --- Google Calendar API (服務帳號與日曆 ID) ---
+  GOOGLE_SERVICE_ACCOUNT_EMAIL?: string;
+  GOOGLE_PRIVATE_KEY?: string;
+  GOOGLE_CALENDAR_ID?: string;
+  DEFAULT_GOOGLE_CALENDAR_ID?: string;
+  CALENDAR_CONFIG?: string;
 }
 
 // ---------- 枚舉定義 ----------

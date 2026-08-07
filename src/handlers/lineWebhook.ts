@@ -6,6 +6,7 @@ import { AppointmentStatus } from "../types";
 import { verifyLineSignature, isBusinessHour } from "../utils";
 import { getUserByLineId } from "../db";
 import { AUTO_REPLY_INTERVAL } from "../constants";
+import { syncAppointmentToGoogleCalendar } from "../utils/googleCalendar";
 
 /** 發送 LINE 訊息 */
 async function sendLineReply(replyToken: string, text: string, accessToken: string): Promise<void> {
@@ -37,8 +38,8 @@ async function handleAppointmentVerification(
     replyText = `❌ 驗證失敗：您的 LINE 尚未綁定網站會員帳號。\n請先至網站註冊或登入後進行 LINE 綁定，才能驗證預約！`;
   } else {
     const appt = await env.reserve_db.prepare(
-      "SELECT id, user_id, status, date, start_time FROM Appointments WHERE appointment_code = ?"
-    ).bind(code).first() as (AppointmentRow & { date: string, start_time: string }) | null;
+      "SELECT id, user_id, status, date, start_time, end_time FROM Appointments WHERE appointment_code = ?"
+    ).bind(code).first() as (AppointmentRow & { date: string; start_time: string; end_time: string }) | null;
 
     if (!appt) {
       replyText = `❌ 找不到此預約編號，或該預約已超過 30 分鐘自動失效。\n請重新至網站預約。`;
@@ -50,6 +51,21 @@ async function handleAppointmentVerification(
       await env.reserve_db.prepare(
         "UPDATE Appointments SET status = ? WHERE id = ?"
       ).bind(AppointmentStatus.CONFIRMED, appt.id).run();
+
+      // 🌟 同步寫入 Google 日曆
+      if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
+        try {
+          const clientName = `${currentUser.last_name || ''}${currentUser.first_name || ''}`;
+          await syncAppointmentToGoogleCalendar(env, {
+            clientName: clientName || `客戶_${appt.id}`,
+            date: appt.date,
+            startTime: appt.start_time,
+            endTime: appt.end_time,
+          });
+        } catch (calendarErr) {
+          console.error("LINE 預約驗證 - Google 日曆同步失敗：", calendarErr);
+        }
+      }
 
       // ✅ 修改回覆訊息：加入預約日期與時間
       replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n📅 預約日期：${appt.date}\n⏰ 預約時間：${appt.start_time}\n\n期待您的光臨！`;

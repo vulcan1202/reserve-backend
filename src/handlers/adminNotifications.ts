@@ -259,7 +259,7 @@ export async function handleNotificationProbe(ctx: HandlerContext): Promise<Resp
     const cacheUrl = new URL(request.url);
     // 依據 admin_id 進行獨立 ETag 快取隔離
     cacheUrl.searchParams.set('admin_id', String(adminId));
-    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET', headers: request.headers });
+    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
 
     // 1. 嘗試從 Cloudflare 邊緣層快取讀取
     let cachedResponse = await cache.match(cacheKey);
@@ -313,7 +313,9 @@ export async function handleNotificationProbe(ctx: HandlerContext): Promise<Resp
       });
     }
 
-    ctx.ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    if (response.status === 200) {
+      ctx.ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    }
 
     return response;
   } catch (err: any) {

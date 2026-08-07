@@ -11,6 +11,7 @@ import { AppointmentStatus, HolidayType } from "../types";
 import { successResponse, errorResponse, calculateEndTime, calculateAge } from "../utils";
 import { MAX_RETRY } from "../constants";
 import { dispatchNotificationToAllAdmins } from "./adminNotifications";
+import { syncAppointmentToGoogleCalendar, deleteGoogleCalendarEvent } from "../utils/googleCalendar";
 
 export async function handleCreateAppointment(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
@@ -55,6 +56,27 @@ export async function handleCreateAppointment(ctx: HandlerContext): Promise<Resp
       } catch (err: unknown) {
         if ((err as { message?: string })?.message?.includes('UNIQUE') && attempt < MAX_RETRY - 1) continue;
         throw err;
+      }
+    }
+
+    // 🌟 若建立預約時狀態即為已確認，自動寫入對應的 Google 日曆
+    const currentStatus = (body as any).status || AppointmentStatus.PENDING;
+    if ((currentStatus === AppointmentStatus.CONFIRMED || currentStatus === 'confirmed') && env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
+      try {
+        const user = await env.reserve_db.prepare(
+          `SELECT last_name, first_name FROM Users WHERE id = ?`
+        ).bind(user_id).first() as { last_name?: string; first_name?: string } | null;
+
+        const clientName = user ? `${user.last_name || ''}${user.first_name || ''}` : `客戶_${user_id}`;
+
+        await syncAppointmentToGoogleCalendar(env, {
+          clientName,
+          date,
+          startTime: start_time,
+          endTime: end_time,
+        });
+      } catch (calendarErr) {
+        console.error("Google 日曆寫入失敗：", calendarErr);
       }
     }
 
@@ -192,13 +214,15 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
 
       // 🌟 即時性廣播通知派發給所有 Admin 帳號 (Instant Notification Dispatch)
       const apptDetail = await env.reserve_db.prepare(`
-        SELECT A.id, A.date, A.start_time, A.appointment_code, U.last_name || U.first_name AS client_name 
+        SELECT A.id, A.date, A.start_time, A.end_time, A.beautician_id, A.appointment_code, U.last_name || U.first_name AS client_name 
         FROM Appointments A 
         JOIN Users U ON A.user_id = U.id 
         WHERE A.id = ?
-      `).bind(id).first<{ id: number; date: string; start_time: string; appointment_code: string; client_name: string }>();
+      `).bind(id).first<{ id: number; date: string; start_time: string; end_time: string; beautician_id?: number | null; appointment_code: string; client_name: string }>();
 
       if (apptDetail) {
+        const targetCalendarKey = apptDetail.beautician_id ? String(apptDetail.beautician_id) : undefined;
+
         if (status === AppointmentStatus.CONFIRMED || status === 'confirmed') {
           const notifId = `appt-confirmed-${id}`;
           const title = `【預約確認】${apptDetail.client_name || '客戶'} 的預約已確認`;
@@ -215,6 +239,22 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
             'mdi:calendar-check',
             'bg-emerald-50 text-emerald-600 border border-emerald-200'
           );
+
+          // 🌟 預約確認時自動寫入對應的 Google 日曆
+          if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
+            try {
+              await syncAppointmentToGoogleCalendar(env, {
+                clientName: apptDetail.client_name || `客戶_${id}`,
+                date: apptDetail.date,
+                startTime: apptDetail.start_time,
+                endTime: apptDetail.end_time,
+              });
+            } catch (calendarErr: any) {
+              console.error("Google 日曆寫入失敗：", calendarErr?.message || calendarErr);
+            }
+          } else {
+            console.warn("⚠️ 未設定 GOOGLE_SERVICE_ACCOUNT_EMAIL 或 GOOGLE_PRIVATE_KEY，跳過 Google 日曆同步。");
+          }
         } else if (status === AppointmentStatus.CANCELLED || status === 'cancelled' || status === 'cancel') {
           const notifId = `appt-cancelled-${id}`;
           const title = `【預約取消】${apptDetail.client_name || '客戶'} 的預約已取消`;
@@ -231,6 +271,20 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
             'mdi:calendar-remove',
             'bg-rose-50 text-rose-600 border border-rose-200'
           );
+
+          // 🌟 預約取消時自動刪除 Google 日曆事件
+          if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
+            try {
+              await deleteGoogleCalendarEvent(env, {
+                clientName: apptDetail.client_name || `客戶_${id}`,
+                date: apptDetail.date,
+                startTime: apptDetail.start_time,
+                endTime: apptDetail.end_time,
+              });
+            } catch (calendarErr) {
+              console.error("Google 日曆刪除失敗：", calendarErr);
+            }
+          }
         }
       }
     }
@@ -312,28 +366,28 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
 
     if (new_courses_bought && new_courses_bought.length > 0) {
       for (const item of new_courses_bought) {
-        if (!item.course_id || !item.amount || item.amount <= 0) continue;
+        if (!item.course_id || !item.buy_amount || item.buy_amount <= 0) continue;
 
         const courseInfo = await env.reserve_db.prepare(`SELECT price, name FROM courses WHERE id = ?`).bind(item.course_id).first() as { price: number; name: string } | null;
         if (!courseInfo) return errorResponse(`找不到課程資料`, 400, headers);
 
-        const totalPrice = courseInfo.price * item.amount;
+        const totalPrice = courseInfo.price * item.buy_amount;
 
         const ucResult = await env.reserve_db.prepare(
           `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
-        ).bind(appt.user_id, item.course_id, item.amount, item.amount).first() as { id: number } | null;
+        ).bind(appt.user_id, item.course_id, item.buy_amount, item.buy_amount).first() as { id: number } | null;
 
         if (ucResult && ucResult.id) {
           batchStatements.push(env.reserve_db.prepare(
             `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
              VALUES (?, ?, 'purchase', ?, ?, ?)`
-          ).bind(appointment_id, ucResult.id, item.amount, item.amount, `現場加購新合約：${courseInfo.name}`));
+          ).bind(appointment_id, ucResult.id, item.buy_amount, item.buy_amount, `現場加購新合約：${courseInfo.name}`));
         }
 
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
            VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
-        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.amount} 堂`, transactionDate));
+        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂`, transactionDate));
       }
     }
 
