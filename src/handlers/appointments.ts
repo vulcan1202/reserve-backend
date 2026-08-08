@@ -147,22 +147,91 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
 
     const batchStatements: any[] = [];
 
-    // 🌟 若修改預約日期，同步更新關聯的財務帳目 (營收認列與現場加購紀錄)
-    if (date !== undefined) {
-      const oldAppt = await env.reserve_db.prepare("SELECT date, user_id FROM Appointments WHERE id = ?").bind(id).first() as { date: string; user_id: number } | null;
-      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET date = ? WHERE id = ?").bind(date, id));
-      if (oldAppt) {
+    // 🌟 1. 讀取預約變更前的原始資料與客戶名稱
+    const oldAppt = await env.reserve_db.prepare(`
+      SELECT A.id, A.date, A.start_time, A.end_time, A.status, A.user_id, U.last_name || U.first_name AS client_name 
+      FROM Appointments A 
+      JOIN Users U ON A.user_id = U.id 
+      WHERE A.id = ?
+    `).bind(id).first<{ id: number; date: string; start_time: string; end_time: string; status: string; user_id: number; client_name: string }>();
+
+    if (!oldAppt) return errorResponse("找不到該筆預約紀錄", 404, headers);
+
+    const isDateChanged = date !== undefined && date !== oldAppt.date;
+    const isTimeChanged = start_time !== undefined && start_time !== oldAppt.start_time;
+
+    let newDate = oldAppt.date;
+    let newStartTime = oldAppt.start_time;
+    let newEndTime = oldAppt.end_time;
+
+    // 🌟 2. 若有修改預約日期或時間，執行衝突檢查、結束時間重新計算與關聯資料連動
+    if (isDateChanged || isTimeChanged) {
+      newDate = date !== undefined ? date : oldAppt.date;
+      newStartTime = start_time !== undefined ? start_time : oldAppt.start_time;
+      newEndTime = calculateEndTime(newStartTime);
+
+      // A. 公休日與休息時段衝突校驗
+      const reqDate = new Date(newDate);
+      const dayOfWeek = reqDate.getDay();
+      const holiday = await env.reserve_db.prepare(
+        `SELECT * FROM ShopHolidays 
+         WHERE (type = ? AND date = ?) OR (type = ? AND day_of_week = ?) OR (type = ? AND date = ? AND (
+                 (start_time <= ? AND end_time > ?) OR (start_time < ? AND end_time >= ?) OR (start_time >= ? AND end_time <= ?)
+               ))`
+      ).bind(
+        HolidayType.FULL_DAY, newDate, HolidayType.WEEKLY, dayOfWeek, HolidayType.TIME_RANGE, newDate,
+        newStartTime, newStartTime, newEndTime, newEndTime, newStartTime, newEndTime
+      ).first();
+
+      if (holiday) {
+        return errorResponse("修改失敗：您選擇的新時間為店家公休日或休息時段，請選擇其他時間。", 409, headers);
+      }
+
+      // B. 與其他未取消預約的時間重疊衝突校驗
+      const conflict = await env.reserve_db.prepare(
+        `SELECT id FROM Appointments WHERE id != ? AND date = ? AND status != ? AND (start_time < ? AND end_time > ?)`
+      ).bind(id, newDate, AppointmentStatus.CANCELLED, newEndTime, newStartTime).first();
+
+      if (conflict) {
+        return errorResponse("修改失敗：您選擇的新時段與其他預約時間重疊，請選擇其他時間。", 409, headers);
+      }
+
+      // C. 更新 Appointments 的 date, start_time, end_time
+      batchStatements.push(
+        env.reserve_db.prepare("UPDATE Appointments SET date = ?, start_time = ?, end_time = ? WHERE id = ?").bind(newDate, newStartTime, newEndTime, id)
+      );
+
+      // D. 若變更日期，同步更新關聯的財務帳目 (營收認列與現場加購紀錄)
+      if (isDateChanged) {
         batchStatements.push(
-          env.reserve_db.prepare("UPDATE revenue_recognitions SET date = ? WHERE appointment_id = ?").bind(date, id)
+          env.reserve_db.prepare("UPDATE revenue_recognitions SET date = ? WHERE appointment_id = ?").bind(newDate, id)
         );
         batchStatements.push(
-          env.reserve_db.prepare("UPDATE cash_transactions SET date = ? WHERE user_id = ? AND date = ? AND description LIKE ?").bind(date, oldAppt.user_id, oldAppt.date, `%現場購買%`)
+          env.reserve_db.prepare("UPDATE cash_transactions SET date = ? WHERE user_id = ? AND date = ? AND description LIKE ?").bind(newDate, oldAppt.user_id, oldAppt.date, `%現場購買%`)
         );
       }
-    }
 
-    if (start_time !== undefined) {
-      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET start_time = ? WHERE id = ?").bind(start_time, id));
+      // E. 若預約當前狀態已是「已確認 (confirmed)」，刪除舊時間 Google 日曆並寫入新時間 Google 日曆
+      if ((oldAppt.status === AppointmentStatus.CONFIRMED || oldAppt.status === 'confirmed') && status === undefined) {
+        if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
+          try {
+            await deleteGoogleCalendarEvent(env, {
+              clientName: oldAppt.client_name || `客戶_${id}`,
+              date: oldAppt.date,
+              startTime: oldAppt.start_time,
+              endTime: oldAppt.end_time,
+            });
+            await syncAppointmentToGoogleCalendar(env, {
+              clientName: oldAppt.client_name || `客戶_${id}`,
+              date: newDate,
+              startTime: newStartTime,
+              endTime: newEndTime,
+            });
+          } catch (calendarErr) {
+            console.error("時間變更同步 Google 日曆失敗：", calendarErr);
+          }
+        }
+      }
     }
 
     if (status !== undefined) {
@@ -211,7 +280,23 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       batchStatements.push(
         env.reserve_db.prepare("UPDATE Appointments SET status = ? WHERE id = ?").bind(status, id)
       );
+    }
 
+    if (notes !== undefined) {
+      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET notes = ? WHERE id = ?").bind(notes, id));
+    }
+    if (beautician_id !== undefined) {
+      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET beautician_id = ? WHERE id = ?").bind(beautician_id, id));
+    }
+    if (user_notes !== undefined && user_id) {
+      batchStatements.push(env.reserve_db.prepare("UPDATE Users SET notes = ? WHERE id = ?").bind(user_notes, user_id));
+    }
+
+    if (batchStatements.length > 0) {
+      await env.reserve_db.batch(batchStatements);
+    }
+
+    if (status !== undefined) {
       // 🌟 即時性廣播通知派發給所有 Admin 帳號 (Instant Notification Dispatch)
       const apptDetail = await env.reserve_db.prepare(`
         SELECT A.id, A.date, A.start_time, A.end_time, A.beautician_id, A.appointment_code, U.last_name || U.first_name AS client_name 
@@ -221,8 +306,6 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       `).bind(id).first<{ id: number; date: string; start_time: string; end_time: string; beautician_id?: number | null; appointment_code: string; client_name: string }>();
 
       if (apptDetail) {
-        const targetCalendarKey = apptDetail.beautician_id ? String(apptDetail.beautician_id) : undefined;
-
         if (status === AppointmentStatus.CONFIRMED || status === 'confirmed') {
           const notifId = `appt-confirmed-${id}`;
           const title = `【預約確認】${apptDetail.client_name || '客戶'} 的預約已確認`;
@@ -289,21 +372,7 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       }
     }
 
-    if (notes !== undefined) {
-      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET notes = ? WHERE id = ?").bind(notes, id));
-    }
-    if (beautician_id !== undefined) {
-      batchStatements.push(env.reserve_db.prepare("UPDATE Appointments SET beautician_id = ? WHERE id = ?").bind(beautician_id, id));
-    }
-    if (user_notes !== undefined && user_id) {
-      batchStatements.push(env.reserve_db.prepare("UPDATE Users SET notes = ? WHERE id = ?").bind(user_notes, user_id));
-    }
-
-    if (batchStatements.length > 0) {
-      await env.reserve_db.batch(batchStatements);
-    }
-
-    return successResponse({}, "狀態與資料回滾更新成功", 200, headers);
+    return successResponse({}, "預約資料更新成功", 200, headers);
   } catch (error: unknown) {
     const err = error as { message?: string };
     console.error("更新失敗：", error);
