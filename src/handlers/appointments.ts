@@ -164,8 +164,18 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
     let newStartTime = oldAppt.start_time;
     let newEndTime = oldAppt.end_time;
 
-    // 🌟 2. 若有修改預約日期或時間，執行衝突檢查、結束時間重新計算與關聯資料連動
+    // 🌟 2. 若有修改預約日期或時間，執行狀態限制、衝突檢查、結束時間重新計算與 Google 日曆重同步
     if (isDateChanged || isTimeChanged) {
+      // 限制：只有「待審核 (pending)」或「已確認 (confirmed)」的預約才能修改時間
+      if (
+        oldAppt.status !== AppointmentStatus.PENDING &&
+        oldAppt.status !== 'pending' &&
+        oldAppt.status !== AppointmentStatus.CONFIRMED &&
+        oldAppt.status !== 'confirmed'
+      ) {
+        return errorResponse("修改失敗：只有「審核中」或「已確認」的預約才可以調整時間。", 400, headers);
+      }
+
       newDate = date !== undefined ? date : oldAppt.date;
       newStartTime = start_time !== undefined ? start_time : oldAppt.start_time;
       newEndTime = calculateEndTime(newStartTime);
@@ -201,18 +211,9 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
         env.reserve_db.prepare("UPDATE Appointments SET date = ?, start_time = ?, end_time = ? WHERE id = ?").bind(newDate, newStartTime, newEndTime, id)
       );
 
-      // D. 若變更日期，同步更新關聯的財務帳目 (營收認列與現場加購紀錄)
-      if (isDateChanged) {
-        batchStatements.push(
-          env.reserve_db.prepare("UPDATE revenue_recognitions SET date = ? WHERE appointment_id = ?").bind(newDate, id)
-        );
-        batchStatements.push(
-          env.reserve_db.prepare("UPDATE cash_transactions SET date = ? WHERE user_id = ? AND date = ? AND description LIKE ?").bind(newDate, oldAppt.user_id, oldAppt.date, `%現場購買%`)
-        );
-      }
-
-      // E. 若預約當前狀態已是「已確認 (confirmed)」，刪除舊時間 Google 日曆並寫入新時間 Google 日曆
-      if ((oldAppt.status === AppointmentStatus.CONFIRMED || oldAppt.status === 'confirmed') && status === undefined) {
+      // D. 若預約當前狀態已是「已確認 (confirmed)」，刪除舊時間 Google 日曆並寫入新時間 Google 日曆
+      const isConfirmedAppt = String(oldAppt.status) === 'confirmed' || String(oldAppt.status) === AppointmentStatus.CONFIRMED;
+      if (isConfirmedAppt && status === undefined) {
         if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
           try {
             await deleteGoogleCalendarEvent(env, {
