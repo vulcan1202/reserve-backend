@@ -296,10 +296,26 @@ export async function deleteGoogleCalendarEvent(
       });
 
       if (listRes.ok) {
-        const listData = (await listRes.json()) as { items?: Array<{ id: string; summary?: string }> };
+        const listData = (await listRes.json()) as { 
+          items?: Array<{ 
+            id: string; 
+            summary?: string; 
+            start?: { dateTime?: string; date?: string };
+          }> 
+        };
         if (listData.items && listData.items.length > 0) {
           listData.items.forEach((item) => {
-            if (item.summary && (item.summary.includes(input.clientName) || item.summary.includes(summaryTarget))) {
+            if (!item.summary) return;
+
+            // 🌟 1. 比對事件標題是否精準包含「時間+客戶姓名」(例如: 17:00王小明)
+            const hasSummaryTarget = item.summary.includes(summaryTarget);
+
+            // 🌟 2. 若僅比對客戶姓名，必須同時驗證「事件開始時間」是否一致
+            const eventStartTimeStr = item.start?.dateTime || '';
+            const isTimeMatch = eventStartTimeStr.includes(hhmm) || eventStartTimeStr.includes(input.startTime);
+            const hasNameAndTimeMatch = item.summary.includes(input.clientName) && isTimeMatch;
+
+            if (hasSummaryTarget || hasNameAndTimeMatch) {
               matchingEventIds.push(item.id);
             }
           });
