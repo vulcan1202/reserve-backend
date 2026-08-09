@@ -10,7 +10,7 @@ import { syncAppointmentToGoogleCalendar } from "../utils/googleCalendar";
 
 /** 發送 LINE 訊息 */
 async function sendLineReply(replyToken: string, text: string, accessToken: string): Promise<void> {
-  await fetch('https://api.line.me/v2/bot/message/reply', {
+  const res = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -21,6 +21,11 @@ async function sendLineReply(replyToken: string, text: string, accessToken: stri
       messages: [{ type: 'text', text }]
     })
   });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("LINE sendLineReply 失敗：", res.status, errText);
+  }
 }
 
 /** 處理預約碼驗證邏輯 */
@@ -52,6 +57,10 @@ async function handleAppointmentVerification(
         "UPDATE Appointments SET status = ? WHERE id = ?"
       ).bind(AppointmentStatus.CONFIRMED, appt.id).run();
 
+      // ✅ 先發送 LINE 回覆訊息（避免因 Google 日曆同步耗時導致 replyToken 過期）
+      replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n📅 預約日期：${appt.date}\n⏰ 預約時間：${appt.start_time}\n\n期待您的光臨！`;
+      await sendLineReply(replyToken, replyText, accessToken);
+
       // 🌟 同步寫入 Google 日曆
       if (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) {
         try {
@@ -67,8 +76,7 @@ async function handleAppointmentVerification(
         }
       }
 
-      // ✅ 修改回覆訊息：加入預約日期與時間
-      replyText = `✅ 預約驗證成功！\n\n您的預約編號 ${code} 已確認。\n📅 預約日期：${appt.date}\n⏰ 預約時間：${appt.start_time}\n\n期待您的光臨！`;
+      return;
     } else {
       replyText = `❌ 此預約已被取消或狀態異常。`;
     }
