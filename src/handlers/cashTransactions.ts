@@ -148,37 +148,107 @@ export async function handleDeleteCashTransaction(ctx: HandlerContext): Promise<
       );
     }
 
-    // 2. 🌟 檢查是否為「課程包套預收」收入
-    if (ct.type === 'income' && ct.category === '課程包套預收' && ct.user_id) {
-      // 尋找對應金額的包套紀錄
-      const pkg = await env.reserve_db.prepare(`
-        SELECT uc.id, uc.amount, uc.remaining_count 
-        FROM users_courses uc
-        JOIN courses c ON uc.course_id = c.id
-        WHERE uc.user_id = ? AND (c.price * uc.amount) = ?
-        ORDER BY uc.purchase_date DESC LIMIT 1
-      `).bind(ct.user_id, ct.amount).first() as any;
+    // 2. 🌟 檢查是否為「課程包套預收」收入，同步刪除會員包套合約 (users_courses)
+    if (ct.type === 'income' && (ct.category === '課程包套預收' || ct.category === '課程銷售') && ct.user_id) {
+      const courseNameMatch = ct.description ? ct.description.match(/「(.*?)」/) : null;
+      const courseName = courseNameMatch ? courseNameMatch[1] : null;
+
+      let pkg: any = null;
+      if (courseName) {
+        pkg = await env.reserve_db.prepare(`
+          SELECT uc.id, uc.amount, uc.remaining_count 
+          FROM users_courses uc
+          JOIN courses c ON uc.course_id = c.id
+          WHERE uc.user_id = ? AND c.name = ?
+          ORDER BY uc.id DESC LIMIT 1
+        `).bind(ct.user_id, courseName).first();
+      }
+
+      if (!pkg) {
+        pkg = await env.reserve_db.prepare(`
+          SELECT uc.id, uc.amount, uc.remaining_count 
+          FROM users_courses uc
+          WHERE uc.user_id = ?
+          ORDER BY uc.id DESC LIMIT 1
+        `).bind(ct.user_id).first();
+      }
 
       if (pkg) {
-        // 防呆：如果此包套已經有被消耗過堂數，禁止直接刪除收入
         if (pkg.amount !== pkg.remaining_count) {
-          return errorResponse("無法刪除此筆收入：對應的會員包套已有部分堂數被預約消耗使用過！", 400, headers);
+          return errorResponse("無法刪除此筆收入：對應的會員包套已有部分堂數被預約履約使用過！請先取消相關點收紀錄。", 400, headers);
         }
-        // 若完全未消耗，一併刪除該筆會員包套合約
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM users_courses WHERE id = ?").bind(pkg.id)
         );
       }
     }
 
-    // 3. 刪除現金收支紀錄本身
+    // 3. 🌟 檢查是否為「產品銷售收入」，同步刪除銷貨紀錄並補回庫存
+    if (ct.type === 'income' && (ct.category === '產品銷售收入' || ct.category === '產品銷售')) {
+      const productNameMatch = ct.description ? ct.description.match(/\[銷售\] (.*?) x(\d+)/) : null;
+      if (productNameMatch) {
+        const pName = productNameMatch[1];
+        const pQty = Number(productNameMatch[2]);
+
+        const it = await env.reserve_db.prepare(`
+          SELECT it.id, it.product_id, it.quantity
+          FROM inventory_transactions it
+          JOIN products p ON it.product_id = p.id
+          WHERE p.name = ? AND it.type = 'sale' AND it.date = ? AND it.quantity = ?
+          ORDER BY it.id DESC LIMIT 1
+        `).bind(pName, ct.date, pQty).first() as any;
+
+        if (it) {
+          batchStatements.push(
+            env.reserve_db.prepare("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").bind(it.quantity, it.product_id)
+          );
+          batchStatements.push(
+            env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE id = ?").bind(it.id)
+          );
+          batchStatements.push(
+            env.reserve_db.prepare("DELETE FROM revenue_recognitions WHERE source_type = 'product_sale' AND date = ? AND description LIKE ?").bind(ct.date, `%${pName}%`)
+          );
+        }
+      }
+    }
+
+    // 4. 🌟 檢查是否為「產品進貨成本」，同步刪除進貨紀錄並扣回庫存
+    if (ct.type === 'expense' && (ct.category === '產品進貨成本' || ct.category === '產品進貨')) {
+      const productNameMatch = ct.description ? ct.description.match(/\[進貨\] (.*?) x(\d+)/) : null;
+      if (productNameMatch) {
+        const pName = productNameMatch[1];
+        const pQty = Number(productNameMatch[2]);
+
+        const it = await env.reserve_db.prepare(`
+          SELECT it.id, it.product_id, it.quantity, p.stock_quantity
+          FROM inventory_transactions it
+          JOIN products p ON it.product_id = p.id
+          WHERE p.name = ? AND it.type = 'purchase' AND it.date = ? AND it.quantity = ?
+          ORDER BY it.id DESC LIMIT 1
+        `).bind(pName, ct.date, pQty).first() as any;
+
+        if (it) {
+          if (it.stock_quantity - it.quantity < 0) {
+            return errorResponse("無法刪除此筆進貨成本：刪除後將導致該產品庫存小於 0！", 400, headers);
+          }
+          batchStatements.push(
+            env.reserve_db.prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").bind(it.quantity, it.product_id)
+          );
+          batchStatements.push(
+            env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE id = ?").bind(it.id)
+          );
+        }
+      }
+    }
+
+    // 5. 刪除現金收支紀錄本身
     batchStatements.push(
       env.reserve_db.prepare("DELETE FROM cash_transactions WHERE id = ?").bind(id)
     );
 
     await env.reserve_db.batch(batchStatements);
 
-    return successResponse({}, "收支紀錄已刪除，相關聯的會員包套或退款帳務已同步更新", 200, headers);
+    return successResponse({}, "收支紀錄已刪除，關聯的會員包套、產品進銷貨及庫存已同步刪除還原", 200, headers);
   } catch (error: unknown) {
     console.error("刪除現金收支失敗：", error);
     return errorResponse("刪除現金收支紀錄失敗", 500, headers);
