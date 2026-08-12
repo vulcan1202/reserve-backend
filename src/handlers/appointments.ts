@@ -271,20 +271,19 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
     if (status !== undefined) {
       const appt = await env.reserve_db.prepare("SELECT status FROM Appointments WHERE id = ?").bind(id).first() as { status: string } | null;
       
-      // 當預約從「已完成」改回「未完成」或「取消」時，執行全面回滾
+      // 🌟 當預約從「已完成」改回「未完成」或「取消」時，執行雙向逆向全面回滾 (Rollback)
       if (appt && appt.status === AppointmentStatus.COMPLETE && status !== AppointmentStatus.COMPLETE) {
         
-        // 1. 取得該預約的所有堂數流水帳紀錄
+        // 1. 復原包堂扣堂與現場新買包堂
         const usedCourses = await env.reserve_db.prepare(
           "SELECT user_course_id, use_count FROM appointment_courses WHERE appointment_id = ?"
         ).bind(id).all();
 
         if (usedCourses.results && usedCourses.results.length > 0) {
           for (const uc of usedCourses.results as { user_course_id: number, use_count: number }[]) {
-            
             const checkNewBuy = await env.reserve_db.prepare(
-              "SELECT id FROM cash_transactions WHERE user_id = (SELECT user_id FROM users_courses WHERE id = ?) AND description LIKE ?"
-            ).bind(uc.user_course_id, `%現場購買%`).first();
+              "SELECT id FROM cash_transactions WHERE user_id = (SELECT user_id FROM users_courses WHERE id = ?) AND (description LIKE ? OR description LIKE ?)"
+            ).bind(uc.user_course_id, `%預約#${id}%`, `%現場購買%`).first();
 
             if (checkNewBuy) {
               batchStatements.push(
@@ -298,16 +297,33 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
           }
         }
 
+        // 2. 刪除履約扣堂紀錄與營收認列
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM appointment_courses WHERE appointment_id = ?").bind(id)
         );
-
         batchStatements.push(
           env.reserve_db.prepare("DELETE FROM revenue_recognitions WHERE appointment_id = ?").bind(id)
         );
 
+        // 3. 🌟 逆向回滾「現場實體保養產品庫存銷貨」 (歸還產品庫存 + 刪除銷貨紀錄)
+        const invSales = await env.reserve_db.prepare(
+          "SELECT product_id, quantity FROM inventory_transactions WHERE description LIKE ?"
+        ).bind(`%預約#${id}%`).all();
+
+        if (invSales.results && invSales.results.length > 0) {
+          for (const inv of invSales.results as { product_id: number, quantity: number }[]) {
+            batchStatements.push(
+              env.reserve_db.prepare("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").bind(inv.quantity, inv.product_id)
+            );
+          }
+          batchStatements.push(
+            env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE description LIKE ?").bind(`%預約#${id}%`)
+          );
+        }
+
+        // 4. 🌟 刪除現場銷售產生的所有財務現金流紀錄 (包套預收與產品銷售)
         batchStatements.push(
-          env.reserve_db.prepare("DELETE FROM cash_transactions WHERE description LIKE ? AND user_id IN (SELECT user_id FROM Appointments WHERE id = ?)").bind(`%現場購買%`, id)
+          env.reserve_db.prepare("DELETE FROM cash_transactions WHERE description LIKE ?").bind(`%預約#${id}%`)
         );
       }
       
@@ -519,7 +535,7 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
            VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
-        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂 (${totalPrice !== defaultTotalPrice ? '優惠特價 $' + totalPrice : '定價 $' + defaultTotalPrice})`, transactionDate));
+        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂 (預約#${appointment_id}) (${totalPrice !== defaultTotalPrice ? '優惠特價 $' + totalPrice : '定價 $' + defaultTotalPrice})`, transactionDate));
 
         if (ucResult && ucResult.id && useCount > 0) {
           batchStatements.push(env.reserve_db.prepare(
@@ -569,20 +585,20 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
           env.reserve_db.prepare(`UPDATE products SET stock_quantity = ? WHERE id = ?`).bind(newStock, item.product_id)
         );
 
-        // B. 記錄庫存銷貨異動 (sale)
+        // B. 記錄庫存銷貨異動 (sale) - 附帶預約編號方便滾動回滾
         batchStatements.push(
           env.reserve_db.prepare(`
             INSERT INTO inventory_transactions (product_id, type, quantity, unit_price, total_amount, user_id, description, date)
             VALUES (?, 'sale', ?, ?, ?, ?, ?, ?)
-          `).bind(item.product_id, item.quantity, unitPrice, totalAmount, appt.user_id, `現場結單銷貨：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
+          `).bind(item.product_id, item.quantity, unitPrice, totalAmount, appt.user_id, `現場結單銷貨 (預約#${appointment_id})：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
         );
 
-        // C. 記錄現金收入 (income / 產品銷售)
+        // C. 記錄現金收入 (income / 產品銷售) - 附帶預約編號方便滾動回滾
         batchStatements.push(
           env.reserve_db.prepare(`
             INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
             VALUES ('income', '產品銷售', ?, ?, ?, ?, ?)
-          `).bind(totalAmount, item.payment_method || 'Cash', appt.user_id, `現場購買產品：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
+          `).bind(totalAmount, item.payment_method || 'Cash', appt.user_id, `現場購買產品 (預約#${appointment_id})：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
         );
       }
     }
