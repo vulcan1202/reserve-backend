@@ -428,9 +428,16 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         batchStatements.push(env.reserve_db.prepare(`UPDATE users_courses SET remaining_count = ? WHERE id = ?`).bind(newRemaining, item.user_course_id));
         
         batchStatements.push(env.reserve_db.prepare(
-          `INSERT INTO revenue_recognitions (source_type, appointment_id, amount, course_name, client_name, date, description) 
-           VALUES ('course_usage', ?, ?, ?, (SELECT last_name || first_name FROM Users WHERE id = ?), ?, ?)`
-        ).bind(appointment_id, courseInfo.price * item.use_count, courseInfo.course_name, appt.user_id, transactionDate, `課程履約認列：${courseInfo.course_name} x ${item.use_count} 堂`));
+          `INSERT INTO revenue_recognitions (source_type, appointment_id, user_id, user_course_id, amount, description, date) 
+           VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          appointment_id, 
+          appt.user_id, 
+          item.user_course_id, 
+          courseInfo.price * item.use_count, 
+          `課程履約認列：${courseInfo.course_name} x ${item.use_count} 堂`, 
+          transactionDate
+        ));
       }
     }
 
