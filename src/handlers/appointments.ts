@@ -20,6 +20,39 @@ export async function handleCreateAppointment(ctx: HandlerContext): Promise<Resp
     const { user_id, date, start_time, beautician_id } = body;
     if (!user_id || !date || !start_time) return errorResponse("缺少必要的預約資訊", 400, headers);
 
+    // 🌟 0. 讀取系統預約開放與限制設定
+    try {
+      const { results: settingsRows } = await env.reserve_db.prepare(
+        "SELECT key, value FROM system_settings WHERE key IN ('booking_advance_days', 'booking_enabled')"
+      ).all() as { results: Array<{ key: string; value: string }> };
+
+      const settingsMap: Record<string, string> = {
+        booking_advance_days: "60",
+        booking_enabled: "1"
+      };
+      if (settingsRows) {
+        for (const r of settingsRows) settingsMap[r.key] = r.value;
+      }
+
+      if (settingsMap.booking_enabled === "0" || settingsMap.booking_enabled === "false") {
+        return errorResponse("店家目前暫時關閉線上預約功能，請直接聯繫門市。", 400, headers);
+      }
+
+      const advanceDays = Number(settingsMap.booking_advance_days || 60);
+      const todayStr = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      const maxDateObj = new Date(Date.now() + 8 * 3600 * 1000 + advanceDays * 86400000);
+      const maxAllowedDateStr = maxDateObj.toISOString().slice(0, 10);
+
+      if (date < todayStr) {
+        return errorResponse("預約日期不可為過去的時間", 400, headers);
+      }
+      if (date > maxAllowedDateStr) {
+        return errorResponse(`預約日期超出開放期限（店家目前最高開放未來 ${advanceDays} 天內之預約）`, 400, headers);
+      }
+    } catch (e) {
+      console.warn("驗證預約系統設定時警告:", e);
+    }
+
     const end_time = calculateEndTime(start_time);
     const reqDate = new Date(date);
     const dayOfWeek = reqDate.getDay();

@@ -74,11 +74,19 @@ import {
   handleDeleteAdminNotification,
   handleNotificationProbe,
 } from "./handlers/adminNotifications";
+import {
+  handleGetSettings,
+  handleUpdateSettings,
+} from "./handlers/settings";
 
 export type RouteHandler = (ctx: HandlerContext) => Promise<Response>;
 
 export const routeHandlers: Record<string, RouteHandler> = {
   'GET:/': handleRoot,
+
+  // --- ⚙️ 系統設定 (System Settings) ---
+  'GET:/api/settings': handleGetSettings,
+  'PUT:/api/settings': handleUpdateSettings,
 
   // --- 🔐 管理員驗證 (Argon2id + Cookie Session) ---
   'POST:/api/admin/login': handleAdminLogin,
