@@ -409,16 +409,37 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         if (!item.user_course_id || !item.use_count || item.use_count <= 0) continue;
 
         const courseInfo = await env.reserve_db.prepare(`
-          SELECT uc.id AS user_course_id, uc.remaining_count, c.price, c.name AS course_name
+          SELECT uc.id AS user_course_id, uc.amount AS total_amount, uc.remaining_count, c.price AS default_unit_price, c.name AS course_name,
+                 (SELECT amount FROM cash_transactions WHERE user_id = appt.user_id AND category = '課程包套預收' AND description LIKE '%' || c.name || '%' ORDER BY id DESC LIMIT 1) AS actual_paid
           FROM users_courses uc
           JOIN courses c ON uc.course_id = c.id
           WHERE uc.id = ? AND uc.user_id = ?
-        `).bind(item.user_course_id, appt.user_id).first() as { user_course_id: number; remaining_count: number; price: number; course_name: string } | null;
+        `).bind(item.user_course_id, appt.user_id).first() as { user_course_id: number; total_amount: number; remaining_count: number; default_unit_price: number; course_name: string; actual_paid?: number } | null;
 
         if (!courseInfo) return errorResponse(`找不到合約資料`, 400, headers);
         if (courseInfo.remaining_count < item.use_count) return errorResponse(`剩餘堂數不足`, 400, headers);
 
+        const totalPackageAmount = courseInfo.total_amount || 1;
+        const actualPaidTotal = (typeof courseInfo.actual_paid === 'number' && courseInfo.actual_paid > 0)
+          ? courseInfo.actual_paid
+          : (courseInfo.default_unit_price * totalPackageAmount);
+
         const newRemaining = courseInfo.remaining_count - item.use_count;
+        let recognizedAmount = 0;
+
+        if (newRemaining === 0) {
+          // 最後一堂用罄：財務實務倒擠清算法 - 以「實際總成交金額 - 過去累積已認列金額」全數清算，解決小數點除不盡誤差
+          const alreadyRecognizedRes = await env.reserve_db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) AS recognized_total FROM revenue_recognitions WHERE user_course_id = ?
+          `).bind(item.user_course_id).first() as { recognized_total: number } | null;
+          
+          const alreadyRecognized = alreadyRecognizedRes?.recognized_total || 0;
+          recognizedAmount = Math.max(0, actualPaidTotal - alreadyRecognized);
+        } else {
+          // 一般堂數：依 (實際總售價 / 總堂數 * 扣除堂數) 四捨五入取整數
+          const unitPrice = actualPaidTotal / totalPackageAmount;
+          recognizedAmount = Math.round(unitPrice * item.use_count);
+        }
 
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
@@ -434,7 +455,7 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
           appointment_id, 
           appt.user_id, 
           item.user_course_id, 
-          courseInfo.price * item.use_count, 
+          recognizedAmount, 
           `課程履約認列：${courseInfo.course_name} x ${item.use_count} 堂`, 
           transactionDate
         ));
