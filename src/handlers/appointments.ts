@@ -417,8 +417,8 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
 export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
   try {
-    const body = (await request.json()) as CompleteAppointmentBody;
-    const { appointment_id, courses_used, new_courses_bought, date } = body;
+    const body = (await request.json()) as any;
+    const { appointment_id, courses_used, new_courses_bought, products_sold, date } = body;
 
     if (!appointment_id) return errorResponse("缺少預約 ID", 400, headers);
 
@@ -437,17 +437,18 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
       ).bind(AppointmentStatus.COMPLETE, appointment_id)
     );
 
+    // 1. 現有包堂履約扣堂
     if (courses_used && courses_used.length > 0) {
       for (const item of courses_used) {
         if (!item.user_course_id || !item.use_count || item.use_count <= 0) continue;
 
         const courseInfo = await env.reserve_db.prepare(`
           SELECT uc.id AS user_course_id, uc.amount AS total_amount, uc.remaining_count, c.price AS default_unit_price, c.name AS course_name,
-                 (SELECT amount FROM cash_transactions WHERE user_id = appt.user_id AND category = '課程包套預收' AND description LIKE '%' || c.name || '%' ORDER BY id DESC LIMIT 1) AS actual_paid
+                 (SELECT amount FROM cash_transactions WHERE user_id = ? AND category = '課程包套預收' AND description LIKE '%' || c.name || '%' ORDER BY id DESC LIMIT 1) AS actual_paid
           FROM users_courses uc
           JOIN courses c ON uc.course_id = c.id
           WHERE uc.id = ? AND uc.user_id = ?
-        `).bind(item.user_course_id, appt.user_id).first() as { user_course_id: number; total_amount: number; remaining_count: number; default_unit_price: number; course_name: string; actual_paid?: number } | null;
+        `).bind(appt.user_id, item.user_course_id, appt.user_id).first() as { user_course_id: number; total_amount: number; remaining_count: number; default_unit_price: number; course_name: string; actual_paid?: number } | null;
 
         if (!courseInfo) return errorResponse(`找不到合約資料`, 400, headers);
         if (courseInfo.remaining_count < item.use_count) return errorResponse(`剩餘堂數不足`, 400, headers);
@@ -495,6 +496,7 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
       }
     }
 
+    // 2. 現場加購新包套
     if (new_courses_bought && new_courses_bought.length > 0) {
       for (const item of new_courses_bought) {
         if (!item.course_id || !item.buy_amount || item.buy_amount <= 0) continue;
@@ -539,6 +541,49 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
             transactionDate
           ));
         }
+      }
+    }
+
+    // 3. 現場銷售實體保養產品 (庫存產品銷售)
+    if (products_sold && products_sold.length > 0) {
+      for (const item of products_sold) {
+        if (!item.product_id || !item.quantity || item.quantity <= 0) continue;
+
+        const productInfo = await env.reserve_db.prepare(`
+          SELECT id, name, selling_price, stock_quantity FROM products WHERE id = ?
+        `).bind(item.product_id).first() as { id: number; name: string; selling_price: number; stock_quantity: number } | null;
+
+        if (!productInfo) return errorResponse(`找不到產品資料`, 400, headers);
+        if (productInfo.stock_quantity < item.quantity) {
+          return errorResponse(`產品「${productInfo.name}」庫存不足（目前庫存為 ${productInfo.stock_quantity} 件）`, 400, headers);
+        }
+
+        const unitPrice = (typeof item.custom_unit_price === 'number' && item.custom_unit_price >= 0)
+          ? item.custom_unit_price
+          : productInfo.selling_price;
+        const totalAmount = unitPrice * item.quantity;
+        const newStock = productInfo.stock_quantity - item.quantity;
+
+        // A. 扣減產品庫存數量
+        batchStatements.push(
+          env.reserve_db.prepare(`UPDATE products SET stock_quantity = ? WHERE id = ?`).bind(newStock, item.product_id)
+        );
+
+        // B. 記錄庫存銷貨異動 (sale)
+        batchStatements.push(
+          env.reserve_db.prepare(`
+            INSERT INTO inventory_transactions (product_id, type, quantity, unit_price, total_amount, user_id, description, date)
+            VALUES (?, 'sale', ?, ?, ?, ?, ?, ?)
+          `).bind(item.product_id, item.quantity, unitPrice, totalAmount, appt.user_id, `現場結單銷貨：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
+        );
+
+        // C. 記錄現金收入 (income / 產品銷售)
+        batchStatements.push(
+          env.reserve_db.prepare(`
+            INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
+            VALUES ('income', '產品銷售', ?, ?, ?, ?, ?)
+          `).bind(totalAmount, item.payment_method || 'Cash', appt.user_id, `現場購買產品：「${productInfo.name}」x ${item.quantity} 件`, transactionDate)
+        );
       }
     }
 
