@@ -268,11 +268,14 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       }
     }
 
+    let isRevertingFromComplete = false;
+
     if (status !== undefined) {
       const appt = await env.reserve_db.prepare("SELECT status FROM Appointments WHERE id = ?").bind(id).first() as { status: string } | null;
       
       // 🌟 當預約從「已完成」改回「未完成」或「取消」時，執行雙向逆向全面回滾 (Rollback)
       if (appt && appt.status === AppointmentStatus.COMPLETE && status !== AppointmentStatus.COMPLETE) {
+        isRevertingFromComplete = true;
         
         // 1. 復原包堂扣堂與現場新買包堂
         const usedCourses = await env.reserve_db.prepare(
@@ -346,8 +349,8 @@ export async function handlePatchAppointment(ctx: HandlerContext): Promise<Respo
       await env.reserve_db.batch(batchStatements);
     }
 
-    if (status !== undefined) {
-      // 🌟 即時性廣播通知派發給所有 Admin 帳號 (Instant Notification Dispatch)
+    // 🌟 只有非當下「取消點收/改為未完成」時，才派發即時性廣播通知
+    if (status !== undefined && !isRevertingFromComplete) {
       const apptDetail = await env.reserve_db.prepare(`
         SELECT A.id, A.date, A.start_time, A.end_time, A.beautician_id, A.appointment_code, U.last_name || U.first_name AS client_name 
         FROM Appointments A 
