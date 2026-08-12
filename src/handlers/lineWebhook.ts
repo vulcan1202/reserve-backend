@@ -132,7 +132,9 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env): Promise<Re
     const userLineId = event.source.userId;
     const text = event.message.text.trim().toUpperCase();
 
-    if (['價目表'].includes(text)) continue;
+    // 🌟 若訊息包含 LINE 官方後台設定好的關鍵字 (例如價目表、價格、價目、MENU等)，Webhook 直接跳過，不發送 Webhook 罐頭訊息
+    const ignoredKeywords = ['價目表', '價目', '價格', '價位', 'MENU', '價單'];
+    if (ignoredKeywords.some(k => text.includes(k))) continue;
 
     const codeMatch = text.match(/^RV-[A-Z0-9]{6}$/);
 
