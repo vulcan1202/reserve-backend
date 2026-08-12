@@ -448,7 +448,10 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         const courseInfo = await env.reserve_db.prepare(`SELECT price, name FROM courses WHERE id = ?`).bind(item.course_id).first() as { price: number; name: string } | null;
         if (!courseInfo) return errorResponse(`找不到課程資料`, 400, headers);
 
-        const totalPrice = courseInfo.price * item.buy_amount;
+        const defaultTotalPrice = courseInfo.price * item.buy_amount;
+        const totalPrice = (typeof item.custom_total_price === 'number' && !isNaN(item.custom_total_price) && item.custom_total_price >= 0)
+          ? item.custom_total_price
+          : defaultTotalPrice;
 
         const ucResult = await env.reserve_db.prepare(
           `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
@@ -464,7 +467,7 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
            VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
-        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂`, transactionDate));
+        ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂 (${totalPrice !== defaultTotalPrice ? '優惠特價 $' + totalPrice : '定價 $' + defaultTotalPrice})`, transactionDate));
       }
     }
 
