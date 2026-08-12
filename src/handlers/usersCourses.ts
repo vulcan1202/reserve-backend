@@ -113,20 +113,41 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
       ).bind(course_id, amount, newRemaining, newDate || null, id)
     );
 
-    const cashTrans = await env.reserve_db.prepare(`
-      SELECT id FROM cash_transactions 
-      WHERE user_id = ? AND category = '課程包套預收' AND type = 'income' 
+    // 🌟 階段 1：根據 user_id 尋找帶有舊課程名稱或新課程名稱的「課程包套預收」/「現場購買」現金流量紀錄
+    let cashTrans = await env.reserve_db.prepare(`
+      SELECT id, description FROM cash_transactions 
+      WHERE user_id = ? AND type = 'income' 
+        AND (category = '課程包套預收' OR description LIKE '%現場購買%' OR description LIKE '%購買%')
         AND (description LIKE ? OR description LIKE ?)
       ORDER BY id DESC LIMIT 1
     `).bind(
       oldPkg.user_id, 
       `%${oldPkg.old_course_name}%`, 
       `%${newCourse.name}%`
-    ).first() as any;
+    ).first() as { id: number; description: string } | null;
+
+    // 🌟 階段 2：若沒找到，尋找同會員「課程包套預收」類別中最新的一筆紀錄
+    if (!cashTrans) {
+      cashTrans = await env.reserve_db.prepare(`
+        SELECT id, description FROM cash_transactions 
+        WHERE user_id = ? AND type = 'income' AND category = '課程包套預收'
+        ORDER BY id DESC LIMIT 1
+      `).bind(oldPkg.user_id).first() as { id: number; description: string } | null;
+    }
+
+    // 🌟 階段 3：若仍沒找到，尋找同會員描述包含「購買」或「現場購買」的最新收入紀錄
+    if (!cashTrans) {
+      cashTrans = await env.reserve_db.prepare(`
+        SELECT id, description FROM cash_transactions 
+        WHERE user_id = ? AND type = 'income' AND (description LIKE '%購買%' OR description LIKE '%包套%')
+        ORDER BY id DESC LIMIT 1
+      `).bind(oldPkg.user_id).first() as { id: number; description: string } | null;
+    }
 
     const updatedDescription = `購買「${newCourse.name}」共 ${amount} 堂 (${newTotalPrice !== defaultTotalPrice ? '優惠特價 $' + newTotalPrice : '定價 $' + defaultTotalPrice})`;
 
     if (cashTrans) {
+      // ✅ 成功匹配連結的收入紀錄：直接原紀錄 UPDATE 覆寫，絕不新增重複收入！
       batchStatements.push(
         env.reserve_db.prepare(
           `UPDATE cash_transactions SET amount = ?, description = ?, date = COALESCE(?, date) WHERE id = ?`
@@ -138,6 +159,7 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
         )
       );
     } else {
+      // ⚠️ 只有在極少數完全沒有任何歷史收入紀錄的情況下，才補建立
       batchStatements.push(
         env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
@@ -152,7 +174,7 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
     }
 
     await env.reserve_db.batch(batchStatements);
-    return successResponse({}, "會員包套修改成功，原始現金收入已同步更新", 200, headers);
+    return successResponse({}, "會員包套修改成功，已成功定位並更新連結的現金收入紀錄", 200, headers);
   } catch (error: unknown) {
     console.error("更新會員課程紀錄失敗：", error);
     return errorResponse("更新會員課程紀錄失敗", 500, headers);
