@@ -74,7 +74,7 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
   const { request, env, headers } = ctx;
   try {
     const body = (await request.json()) as any;
-    const { id, course_id, amount, purchase_date, date } = body;
+    const { id, course_id, amount, custom_total_price, purchase_date, date } = body;
     const newDate = purchase_date || date;
 
     if (!id) return errorResponse("缺少會員課程紀錄 ID", 400, headers);
@@ -98,7 +98,11 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
       return errorResponse("修改失敗：剩餘堂數不可小於 0（已有部分堂數被預約消耗）", 400, headers);
     }
 
-    const newTotalPrice = newCourse.price * amount;
+    const defaultTotalPrice = newCourse.price * amount;
+    const newTotalPrice = (typeof custom_total_price === 'number' && !isNaN(custom_total_price) && custom_total_price >= 0)
+      ? custom_total_price
+      : defaultTotalPrice;
+
     const batchStatements: any[] = [];
 
     batchStatements.push(
@@ -120,13 +124,15 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
       `%${newCourse.name}%`
     ).first() as any;
 
+    const updatedDescription = `購買「${newCourse.name}」共 ${amount} 堂 (${newTotalPrice !== defaultTotalPrice ? '優惠特價 $' + newTotalPrice : '定價 $' + defaultTotalPrice})`;
+
     if (cashTrans) {
       batchStatements.push(
         env.reserve_db.prepare(
           `UPDATE cash_transactions SET amount = ?, description = ?, date = COALESCE(?, date) WHERE id = ?`
         ).bind(
           newTotalPrice,
-          `購買「${newCourse.name}」共 ${amount} 堂`,
+          updatedDescription,
           newDate || null,
           cashTrans.id
         )
@@ -139,7 +145,7 @@ export async function handleUpdateUserCourse(ctx: HandlerContext): Promise<Respo
         ).bind(
           newTotalPrice,
           oldPkg.user_id,
-          `購買「${newCourse.name}」共 ${amount} 堂`,
+          updatedDescription,
           newDate || null
         )
       );
