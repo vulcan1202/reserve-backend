@@ -474,21 +474,38 @@ export async function handleCompleteAppointment(ctx: HandlerContext): Promise<Re
           ? item.custom_total_price
           : defaultTotalPrice;
 
+        const useCount = (typeof item.use_count === 'number' && item.use_count > 0) ? item.use_count : 0;
+        const finalRemaining = Math.max(0, item.buy_amount - useCount);
+
         const ucResult = await env.reserve_db.prepare(
           `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
-        ).bind(appt.user_id, item.course_id, item.buy_amount, item.buy_amount).first() as { id: number } | null;
-
-        if (ucResult && ucResult.id) {
-          batchStatements.push(env.reserve_db.prepare(
-            `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
-             VALUES (?, ?, 'purchase', ?, ?, ?)`
-          ).bind(appointment_id, ucResult.id, item.buy_amount, item.buy_amount, `現場加購新合約：${courseInfo.name}`));
-        }
+        ).bind(appt.user_id, item.course_id, item.buy_amount, finalRemaining).first() as { id: number } | null;
 
         batchStatements.push(env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
            VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
         ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂 (${totalPrice !== defaultTotalPrice ? '優惠特價 $' + totalPrice : '定價 $' + defaultTotalPrice})`, transactionDate));
+
+        if (ucResult && ucResult.id && useCount > 0) {
+          batchStatements.push(env.reserve_db.prepare(
+            `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
+             VALUES (?, ?, 'usage', ?, ?, ?)`
+          ).bind(appointment_id, ucResult.id, useCount, finalRemaining, `現場加購並履約使用：${courseInfo.name}`));
+
+          const recognizedAmount = Math.round((totalPrice / item.buy_amount) * useCount);
+
+          batchStatements.push(env.reserve_db.prepare(
+            `INSERT INTO revenue_recognitions (source_type, appointment_id, user_id, user_course_id, amount, description, date) 
+             VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            appointment_id, 
+            appt.user_id, 
+            ucResult.id, 
+            recognizedAmount, 
+            `現場加購履約認列：${courseInfo.name} x ${useCount} 堂`, 
+            transactionDate
+          ));
+        }
       }
     }
 
