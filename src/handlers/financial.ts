@@ -61,7 +61,9 @@ export async function handleGetFinancialSummary(ctx: HandlerContext): Promise<Re
       },
       revenue_recognition: {
         course_revenue: courseRevenue,
+        course_recognized_revenue: courseRevenue,
         product_revenue: productRevenue,
+        product_recognized_revenue: productRevenue,
         total_recognized_revenue: totalRecognizedRevenue,
         estimated_cost: estimatedCost
       }

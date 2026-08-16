@@ -112,13 +112,26 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
         const badgeClass = 'bg-purple-100 text-purple-800 border-purple-200';
         const icon = 'mdi:chart-timeline-variant-shimmer';
         const iconBg = 'bg-purple-50 text-purple-600 border border-purple-200';
-        const link = '/analytics';
+        
+        // 精準計算本週一 (startDate) 與週日 (endDate)
+        const mondayDate = new Date(taiwanDate);
+        mondayDate.setDate(taiwanDate.getDate() - 6);
+        const startStr = getTaiwanDateTimeDetails(mondayDate).dateStr;
+        const endStr = taiwanTime.dateStr;
+        const link = `/analytics?preset=week&start_date=${startStr}&end_date=${endStr}`;
 
         await env.reserve_db.prepare(`
           INSERT OR IGNORE INTO admin_notifications 
           (admin_id, notification_id, type, title, message, link, badge_text, badge_class, icon, icon_bg, is_read, created_at)
           VALUES (?, ?, 'financial_weekly', ?, ?, ?, ?, ?, ?, ?, 0, ?)
         `).bind(adminId, notifId, title, message, link, badgeText, badgeClass, icon, iconBg, taiwanTime.fullStr).run();
+
+        // 同步修正舊版若為純 /analytics 的連結
+        await env.reserve_db.prepare(`
+          UPDATE admin_notifications 
+          SET link = ? 
+          WHERE admin_id = ? AND type = 'financial_weekly' AND (link = '/analytics' OR link = '')
+        `).bind(link, adminId).run();
       }
 
       // 3. 月財報定時推播 (月底 22:00 以後)
@@ -130,7 +143,7 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
         const badgeClass = 'bg-amber-100 text-amber-800 border-amber-200';
         const icon = 'mdi:finance';
         const iconBg = 'bg-amber-50 text-amber-600 border border-amber-200';
-        const link = '/finance';
+        const link = `/analytics?preset=month&start_date=${taiwanTime.year}-${taiwanTime.month}-01&end_date=${taiwanTime.dateStr}`;
 
         await env.reserve_db.prepare(`
           INSERT OR IGNORE INTO admin_notifications 
