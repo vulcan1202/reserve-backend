@@ -48,7 +48,7 @@ export async function handleGetFinancialSummary(ctx: HandlerContext): Promise<Re
 
     const totalCashIncome = cashIncomeRow?.total || 0;
     const totalCashExpense = cashExpenseRow?.total || 0;
-    const totalRecognizedRevenue = courseRevenue + productRevenue;
+    const totalRecognizedRevenue = courseRevenue; // 🌟 實質認列營收僅計算課程到店消耗履約，不包含產品
     const estimatedCost = Math.round(costRow?.total_cost || 0);
 
     return successResponse({
@@ -64,6 +64,7 @@ export async function handleGetFinancialSummary(ctx: HandlerContext): Promise<Re
         course_recognized_revenue: courseRevenue,
         product_revenue: productRevenue,
         product_recognized_revenue: productRevenue,
+        product_sales: productRevenue,
         total_recognized_revenue: totalRecognizedRevenue,
         estimated_cost: estimatedCost
       }
