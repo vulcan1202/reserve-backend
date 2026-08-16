@@ -40,11 +40,26 @@ export async function handleGetFinancialSummary(ctx: HandlerContext): Promise<Re
     ).bind(startDate, endDate).first() as { total_cost: number };
 
     let courseRevenue = 0;
-    let productRevenue = 0;
+    let productRevenueFromRR = 0;
     for (const row of revenueRows.results as any[]) {
       if (row.source_type === 'course_usage') courseRevenue = row.total;
-      if (row.source_type === 'product_sale') productRevenue = row.total;
+      if (row.source_type === 'product_sale') productRevenueFromRR = row.total;
     }
+
+    // 🌟 全面防漏：從 inventory_transactions (type='sale') 與 cash_transactions (產品銷售) 撈取產品銷售額
+    const invSaleRow = await env.reserve_db.prepare(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total 
+       FROM inventory_transactions 
+       WHERE type = 'sale' AND date >= ? AND date <= ?`
+    ).bind(startDate, endDate).first() as { total: number };
+
+    const cashSaleRow = await env.reserve_db.prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS total 
+       FROM cash_transactions 
+       WHERE type = 'income' AND (category LIKE '%產品%' OR category LIKE '%銷售%') AND date >= ? AND date <= ?`
+    ).bind(startDate, endDate).first() as { total: number };
+
+    const productRevenue = Math.max(productRevenueFromRR, invSaleRow?.total || 0, cashSaleRow?.total || 0);
 
     const totalCashIncome = cashIncomeRow?.total || 0;
     const totalCashExpense = cashExpenseRow?.total || 0;
