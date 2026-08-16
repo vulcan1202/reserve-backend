@@ -45,6 +45,50 @@ export async function handleGetUsersCourses(ctx: HandlerContext): Promise<Respon
   }
 }
 
+// 🌟 查詢包套課程使用與異動歷史紀錄 (包含預約、美容師、退款快照)
+export async function handleGetUserCourseHistory(ctx: HandlerContext): Promise<Response> {
+  const { env, headers, url } = ctx;
+  try {
+    const userCourseId = url.searchParams.get('user_course_id');
+    const userId = url.searchParams.get('user_id');
+
+    let query = `
+      SELECT ac.*, 
+             a.date AS appointment_date, a.start_time AS appointment_start_time, a.end_time AS appointment_end_time, a.appointment_code, a.status AS appointment_status,
+             b.name AS beautician_name,
+             uc.amount AS total_amount, uc.remaining_count AS current_remaining, uc.purchase_date,
+             c.name AS course_name, c.price AS course_price,
+             u.last_name || u.first_name AS client_name, u.phone AS client_phone
+      FROM appointment_courses ac
+      JOIN users_courses uc ON ac.user_course_id = uc.id
+      JOIN courses c ON uc.course_id = c.id
+      JOIN Users u ON uc.user_id = u.id
+      LEFT JOIN Appointments a ON ac.appointment_id = a.id
+      LEFT JOIN beauticians b ON a.beautician_id = b.id
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+    if (userCourseId) {
+      query += " AND ac.user_course_id = ?";
+      params.push(userCourseId);
+    }
+    if (userId) {
+      query += " AND uc.user_id = ?";
+      params.push(userId);
+    }
+    query += " ORDER BY ac.created_at DESC, ac.id DESC";
+
+    const { results } = params.length > 0
+      ? await env.reserve_db.prepare(query).bind(...params).all()
+      : await env.reserve_db.prepare(query).all();
+
+    return successResponse(results || [], undefined, 200, headers);
+  } catch (error: unknown) {
+    console.error("讀取包套使用紀錄失敗：", error);
+    return errorResponse("讀取包套使用紀錄失敗", 500, headers);
+  }
+}
+
 export async function handleCreateUserCourse(ctx: HandlerContext): Promise<Response> {
   const { request, env, headers } = ctx;
   try {

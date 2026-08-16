@@ -46,6 +46,7 @@ import {
 } from "./handlers/courses";
 import {
   handleGetUsersCourses,
+  handleGetUserCourseHistory,
   handleCreateUserCourse,
   handleUpdateUserCourse,
   handleDeleteUserCourse,
@@ -157,6 +158,7 @@ export const routeHandlers: Record<string, RouteHandler> = {
 
   // --- 🎫 會員已購買課程 API (Users Courses) ---
   'GET:/api/users-courses': handleGetUsersCourses,
+  'GET:/api/users-courses/history': handleGetUserCourseHistory,
   'POST:/api/users-courses': handleCreateUserCourse,
   'PUT:/api/users-courses': handleUpdateUserCourse,
   'DELETE:/api/users-courses': handleDeleteUserCourse,
