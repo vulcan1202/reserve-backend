@@ -68,30 +68,30 @@ export async function handleUpsertQuestionnaire(ctx: HandlerContext): Promise<Re
     if (exists) {
       // 更新現有問卷
       result = await env.reserve_db.prepare(
-      `UPDATE client_questionnaires SET
-        how_to_know = COALESCE(?, how_to_know),
-        history_of_treatments = COALESCE(?, history_of_treatments),
-        allergies = COALESCE(?, allergies),
-        medical_history = COALESCE(?, medical_history),
-        skin_type = COALESCE(?, skin_type),
-        concerns = COALESCE(?, concerns),
-        Habit = COALESCE(?, Habit),
-        notes = COALESCE(?, notes),
-        agreed_to_terms = COALESCE(?, agreed_to_terms)
-      WHERE user_id = ?
-      RETURNING *`
-    ).bind(
-      how_to_know || null,
-      history_of_treatments || null,
-      allergies || null,
-      medical_history || null,
-      skin_type || null,
-      concerns || null,
-      Habit || null,
-      notes || null,
-      agreed_to_terms !== undefined ? (agreed_to_terms ? 1 : 0) : null,
-      user_id
-    ).first();
+        `UPDATE client_questionnaires SET
+          how_to_know = ?,
+          history_of_treatments = ?,
+          allergies = ?,
+          medical_history = ?,
+          skin_type = ?,
+          concerns = ?,
+          Habit = ?,
+          notes = ?,
+          agreed_to_terms = ?
+        WHERE user_id = ?
+        RETURNING *`
+      ).bind(
+        how_to_know || 'other',
+        history_of_treatments || null,
+        allergies || null,
+        medical_history || null,
+        skin_type || null,
+        concerns || null,
+        Habit || null,
+        notes || null,
+        agreed_to_terms ? 1 : 0,
+        user_id
+      ).first();
     } else {
       // 新增問卷
       result = await env.reserve_db.prepare(
