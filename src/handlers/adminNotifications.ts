@@ -114,8 +114,9 @@ export async function handleGetAdminNotifications(ctx: HandlerContext): Promise<
         const iconBg = 'bg-purple-50 text-purple-600 border border-purple-200';
         
         // 精準計算本週一 (startDate) 與週日 (endDate)
-        const mondayDate = new Date(taiwanDate);
-        mondayDate.setDate(taiwanDate.getDate() - 6);
+        const taiwanDateObj = new Date(`${taiwanTime.dateStr}T00:00:00+08:00`);
+        const mondayDate = new Date(taiwanDateObj);
+        mondayDate.setDate(taiwanDateObj.getDate() - 6);
         const startStr = getTaiwanDateTimeDetails(mondayDate).dateStr;
         const endStr = taiwanTime.dateStr;
         const link = `/analytics?preset=week&start_date=${startStr}&end_date=${endStr}`;

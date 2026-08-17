@@ -17,6 +17,8 @@ import {
   handleGetAppointments,
   handlePatchAppointment,
   handleCompleteAppointment,
+  handleGetAppointmentFulfillmentDetail,
+  handleUpdateAppointmentFulfillment,
 } from "./handlers/appointments";
 import { handleBeauticians } from "./handlers/beauticians";
 import { handleHolidays } from "./handlers/holidays";
@@ -114,6 +116,8 @@ export const routeHandlers: Record<string, RouteHandler> = {
   'GET:/api/appointments': handleGetAppointments,
   'PATCH:/api/appointments': handlePatchAppointment,
   'POST:/api/appointments/complete': handleCompleteAppointment,
+  'GET:/api/appointments/fulfillment': handleGetAppointmentFulfillmentDetail,
+  'PUT:/api/appointments/fulfillment': handleUpdateAppointmentFulfillment,
 
   // --- 💇 美容師 ---
   'GET:/api/beauticians': handleBeauticians,
