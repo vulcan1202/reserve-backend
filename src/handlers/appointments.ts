@@ -698,6 +698,8 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
     const transactionDate = date || appt.date;
 
     // --- STEP 1: 先將該筆預約過去產生的扣堂、庫存扣減、營收認列與現金流水執行全量逆向回滾 (Rollback) ---
+    const rollbackStatements: any[] = [];
+
     // 1. 復原包堂扣堂與現場新買包堂
     const prevUsedCourses = await env.reserve_db.prepare(
       "SELECT user_course_id, use_count FROM appointment_courses WHERE appointment_id = ?"
@@ -710,21 +712,21 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         ).bind(uc.user_course_id, `%預約#${appointment_id}%`, `%現場購買%`).first();
 
         if (checkNewBuy) {
-          batchStatements.push(
+          rollbackStatements.push(
             env.reserve_db.prepare("DELETE FROM users_courses WHERE id = ?").bind(uc.user_course_id)
           );
         } else {
-          batchStatements.push(
+          rollbackStatements.push(
             env.reserve_db.prepare("UPDATE users_courses SET remaining_count = remaining_count + ? WHERE id = ?").bind(uc.use_count, uc.user_course_id)
           );
         }
       }
     }
 
-    batchStatements.push(
+    rollbackStatements.push(
       env.reserve_db.prepare("DELETE FROM appointment_courses WHERE appointment_id = ?").bind(appointment_id)
     );
-    batchStatements.push(
+    rollbackStatements.push(
       env.reserve_db.prepare("DELETE FROM revenue_recognitions WHERE appointment_id = ?").bind(appointment_id)
     );
 
@@ -735,21 +737,28 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
 
     if (prevInvSales.results && prevInvSales.results.length > 0) {
       for (const inv of prevInvSales.results as { product_id: number, quantity: number }[]) {
-        batchStatements.push(
+        rollbackStatements.push(
           env.reserve_db.prepare("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").bind(inv.quantity, inv.product_id)
         );
       }
-      batchStatements.push(
+      rollbackStatements.push(
         env.reserve_db.prepare("DELETE FROM inventory_transactions WHERE description LIKE ?").bind(`%預約#${appointment_id}%`)
       );
     }
 
     // 3. 刪除現金交易紀錄
-    batchStatements.push(
+    rollbackStatements.push(
       env.reserve_db.prepare("DELETE FROM cash_transactions WHERE description LIKE ?").bind(`%預約#${appointment_id}%`)
     );
 
-    // --- STEP 2: 重新套用新的課程扣抵、加購包套與產品銷售 ---
+    // 🌟 先執行回滾，確保資料庫中剩餘堂數與產品庫存已完全恢復為扣抵前的真實原狀
+    if (rollbackStatements.length > 0) {
+      await env.reserve_db.batch(rollbackStatements);
+    }
+
+    // --- STEP 2: 重新套用新的課程扣抵、加購包套與產品銷售 (讀取的庫存與剩餘堂數已是最新原狀，僅精確扣除差額) ---
+    const newStatements: any[] = [];
+
     // A. 課程履約扣堂
     if (courses_used && courses_used.length > 0) {
       for (const item of courses_used) {
@@ -764,6 +773,9 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         `).bind(appt.user_id, item.user_course_id, appt.user_id).first() as { user_course_id: number; total_amount: number; remaining_count: number; default_unit_price: number; course_name: string; actual_paid?: number } | null;
 
         if (!courseInfo) return errorResponse(`找不到課程包堂資料`, 400, headers);
+        if (courseInfo.remaining_count < item.use_count) {
+          return errorResponse(`包套「${courseInfo.course_name}」剩餘堂數不足（目前可用為 ${courseInfo.remaining_count} 堂）`, 400, headers);
+        }
 
         const totalPackageAmount = courseInfo.total_amount || 1;
         const actualPaidTotal = (typeof courseInfo.actual_paid === 'number' && courseInfo.actual_paid > 0)
@@ -774,14 +786,14 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         const unitPrice = actualPaidTotal / totalPackageAmount;
         const recognizedAmount = Math.round(unitPrice * item.use_count);
 
-        batchStatements.push(env.reserve_db.prepare(
+        newStatements.push(env.reserve_db.prepare(
           `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
            VALUES (?, ?, 'usage', ?, ?, ?)`
         ).bind(appointment_id, item.user_course_id, item.use_count, newRemaining, `到店履約扣堂：${courseInfo.course_name}`));
         
-        batchStatements.push(env.reserve_db.prepare(`UPDATE users_courses SET remaining_count = ? WHERE id = ?`).bind(newRemaining, item.user_course_id));
+        newStatements.push(env.reserve_db.prepare(`UPDATE users_courses SET remaining_count = ? WHERE id = ?`).bind(newRemaining, item.user_course_id));
         
-        batchStatements.push(env.reserve_db.prepare(
+        newStatements.push(env.reserve_db.prepare(
           `INSERT INTO revenue_recognitions (source_type, appointment_id, user_id, user_course_id, amount, description, date) 
            VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
         ).bind(
@@ -815,20 +827,20 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
           `INSERT INTO users_courses (user_id, course_id, amount, remaining_count) VALUES (?, ?, ?, ?) RETURNING id`
         ).bind(appt.user_id, item.course_id, item.buy_amount, finalRemaining).first() as { id: number } | null;
 
-        batchStatements.push(env.reserve_db.prepare(
+        newStatements.push(env.reserve_db.prepare(
           `INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date) 
            VALUES ('income', '課程包套預收', ?, ?, ?, ?, ?)`
         ).bind(totalPrice, item.payment_method || 'Cash', appt.user_id, `現場購買「${courseInfo.name}」共 ${item.buy_amount} 堂 (預約#${appointment_id}) (${totalPrice !== defaultTotalPrice ? '優惠特價 $' + totalPrice : '定價 $' + defaultTotalPrice})`, transactionDate));
 
         if (ucResult && ucResult.id && useCount > 0) {
-          batchStatements.push(env.reserve_db.prepare(
+          newStatements.push(env.reserve_db.prepare(
             `INSERT INTO appointment_courses (appointment_id, user_course_id, type, use_count, balance_after, description) 
              VALUES (?, ?, 'usage', ?, ?, ?)`
           ).bind(appointment_id, ucResult.id, useCount, finalRemaining, `現場加購並履約使用：${courseInfo.name}`));
 
           const recognizedAmount = Math.round((totalPrice / item.buy_amount) * useCount);
 
-          batchStatements.push(env.reserve_db.prepare(
+          newStatements.push(env.reserve_db.prepare(
             `INSERT INTO revenue_recognitions (source_type, appointment_id, user_id, user_course_id, amount, description, date) 
              VALUES ('course_usage', ?, ?, ?, ?, ?, ?)`
           ).bind(
@@ -853,6 +865,9 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         `).bind(item.product_id).first() as { id: number; name: string; selling_price: number; stock_quantity: number } | null;
 
         if (!productInfo) return errorResponse(`找不到產品資料`, 400, headers);
+        if (productInfo.stock_quantity < item.quantity) {
+          return errorResponse(`產品「${productInfo.name}」庫存不足（目前庫存為 ${productInfo.stock_quantity} 件）`, 400, headers);
+        }
 
         const unitPrice = (typeof item.custom_unit_price === 'number' && item.custom_unit_price >= 0)
           ? item.custom_unit_price
@@ -861,12 +876,12 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         const newStock = productInfo.stock_quantity - item.quantity;
 
         // 扣減庫存
-        batchStatements.push(
+        newStatements.push(
           env.reserve_db.prepare(`UPDATE products SET stock_quantity = ? WHERE id = ?`).bind(newStock, item.product_id)
         );
 
         // 銷貨流水
-        batchStatements.push(
+        newStatements.push(
           env.reserve_db.prepare(`
             INSERT INTO inventory_transactions (product_id, type, quantity, unit_price, total_amount, user_id, description, date)
             VALUES (?, 'sale', ?, ?, ?, ?, ?, ?)
@@ -874,7 +889,7 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
         );
 
         // 現金收入
-        batchStatements.push(
+        newStatements.push(
           env.reserve_db.prepare(`
             INSERT INTO cash_transactions (type, category, amount, payment_method, user_id, description, date)
             VALUES ('income', '產品銷售', ?, ?, ?, ?, ?)
@@ -883,8 +898,8 @@ export async function handleUpdateAppointmentFulfillment(ctx: HandlerContext): P
       }
     }
 
-    if (batchStatements.length > 0) {
-      await env.reserve_db.batch(batchStatements);
+    if (newStatements.length > 0) {
+      await env.reserve_db.batch(newStatements);
     }
 
     return successResponse({}, "已成功更新履約課程與產品銷售明細！", 200, headers);
